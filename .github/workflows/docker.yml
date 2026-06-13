@@ -1,0 +1,69 @@
+name: Build Codex Runtime Base Image
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+  schedule:
+    # Daily rebuild in UTC. This keeps the Codex CLI installer result and apt packages reasonably fresh.
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_BASENAME: codex-dev-base
+
+jobs:
+  build-base:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        shell: bash
+        run: |
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          DATE_TAG="$(date -u +"%Y%m%d")"
+          SHORT_SHA="${GITHUB_SHA::7}"
+
+          echo "image_name=ghcr.io/${OWNER_LC}/${IMAGE_BASENAME}" >> "$GITHUB_OUTPUT"
+          echo "date_tag=${DATE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push base image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: base/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ steps.meta.outputs.image_name }}:latest
+            ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.date_tag }}
+            ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=codex-dev-base
+            org.opencontainers.image.description=Generic Codex runtime container base image. Project dependencies are installed later inside the container.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max 
