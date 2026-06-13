@@ -73,12 +73,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd --gid ${USER_GID} ${USERNAME} \
-    && useradd --uid ${USER_UID} --gid ${USER_GID} -m -s /bin/bash ${USERNAME} \
-    && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME} \
-    && chmod 0440 /etc/sudoers.d/${USERNAME} \
-    && mkdir -p /workspace \
-    && chown -R ${USERNAME}:${USERNAME} /workspace /home/${USERNAME}
+# Ubuntu 24.04 base images may already contain UID/GID 1000.
+# Reuse/rename the existing account/group when needed instead of blindly creating them.
+RUN set -eux; \
+    if getent passwd "${USERNAME}" >/dev/null; then \
+        true; \
+    elif getent passwd "${USER_UID}" >/dev/null; then \
+        EXISTING_USER="$(getent passwd "${USER_UID}" | cut -d: -f1)"; \
+        usermod -l "${USERNAME}" -d "/home/${USERNAME}" -m "${EXISTING_USER}"; \
+    else \
+        if getent group "${USER_GID}" >/dev/null; then \
+            GROUP_NAME="$(getent group "${USER_GID}" | cut -d: -f1)"; \
+        else \
+            groupadd --gid "${USER_GID}" "${USERNAME}"; \
+            GROUP_NAME="${USERNAME}"; \
+        fi; \
+        useradd --uid "${USER_UID}" --gid "${GROUP_NAME}" -m -s /bin/bash "${USERNAME}"; \
+    fi; \
+    if ! getent group "${USERNAME}" >/dev/null; then \
+        if getent group "${USER_GID}" >/dev/null; then \
+            EXISTING_GROUP="$(getent group "${USER_GID}" | cut -d: -f1)"; \
+            groupmod -n "${USERNAME}" "${EXISTING_GROUP}" || true; \
+        else \
+            groupadd --gid "${USER_GID}" "${USERNAME}"; \
+        fi; \
+    fi; \
+    usermod -g "${USERNAME}" "${USERNAME}" || true; \
+    usermod -aG sudo "${USERNAME}"; \
+    echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}; \
+    chmod 0440 /etc/sudoers.d/${USERNAME}; \
+    mkdir -p /workspace "/home/${USERNAME}"; \
+    chown -R "${USERNAME}:${USERNAME}" /workspace "/home/${USERNAME}"
 
 USER ${USERNAME}
 WORKDIR /home/${USERNAME}
