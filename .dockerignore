@@ -1,0 +1,5 @@
+.git
+.github
+workspace
+*.log
+.DS_Store
