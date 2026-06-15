@@ -10,7 +10,7 @@ services:
 
       # 单一持久化 home volume：
       # Codex 登录态、mise 运行时、git 配置、npm/pnpm/pip/go/cargo 等缓存都会保存在这里。
-      - dev-home:/home/dev
+      - codex-dev-home:/home/dev
 
     environment:
       - CODEX_HOME=/home/dev/.codex
@@ -20,4 +20,4 @@ services:
     command: bash
 
 volumes:
-  dev-home:
+  codex-dev-home:

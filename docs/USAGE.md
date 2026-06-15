@@ -48,7 +48,7 @@ docker compose run --rm codex
 
 ```text
 ./workspace  → /workspace
-dev-home     → /home/dev
+codex-dev-home     → /home/dev
 ```
 
 `/home/dev` 会统一保存 Codex 登录态、mise、git 配置和各种语言缓存。
@@ -78,13 +78,36 @@ ssh-add ~/.ssh/id_ed25519
 codex
 ```
 
-Codex 登录状态会保存在 `dev-home` 这个 Docker volume 中：
+Codex 登录状态会保存在 `codex-dev-home` 这个 Docker volume 中：
 
 ```text
-dev-home:/home/dev
+codex-dev-home:/home/dev
 ```
 
 不要把登录状态写进镜像。
+
+
+## `/home/dev` 权限修复
+
+容器启动时入口脚本会自动修复 `/home/dev` 的属主，然后降权为 `dev` 用户运行。
+
+如果你看到类似错误：
+
+```text
+mkdir: cannot create directory ‘/home/dev/.codex’: Permission denied
+```
+
+请确认已经使用包含此修复的新镜像重新构建并拉取：
+
+```bash
+docker pull ghcr.io/wekingchen/codex-dev-base:latest
+```
+
+如果仍然异常，可以重置 home volume：
+
+```bash
+./scripts/reset-home-volume.sh
+```
 
 ## 5. 让 Codex 按项目安装依赖
 

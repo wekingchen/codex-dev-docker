@@ -8,6 +8,8 @@ ARG USER_GID=$USER_UID
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=zh_CN.UTF-8
 ENV LC_ALL=zh_CN.UTF-8
+ENV DEV_USER=${USERNAME}
+ENV DEV_HOME=/home/${USERNAME}
 ENV CODEX_HOME=/home/${USERNAME}/.codex
 ENV MISE_DATA_DIR=/home/${USERNAME}/.local/share/mise
 ENV MISE_CONFIG_DIR=/home/${USERNAME}/.config/mise
@@ -24,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     git-lfs \
     sudo \
+    gosu \
     zsh \
     openssh-client \
     gnupg \
@@ -136,6 +139,9 @@ RUN mkdir -p "${CODEX_HOME}" "${MISE_DATA_DIR}" "${MISE_CONFIG_DIR}" /home/${USE
     && printf '\n# mise\nif command -v mise >/dev/null 2>&1; then\n  eval "$(mise activate bash)"\nfi\n\n# direnv\nif command -v direnv >/dev/null 2>&1; then\n  eval "$(direnv hook bash)"\nfi\n' >> /home/${USERNAME}/.bashrc \
     && printf '\n# mise\nif command -v mise >/dev/null 2>&1; then\n  eval "$(mise activate bash)"\nfi\n' >> /home/${USERNAME}/.profile
 
+# 最终保持 root 运行 entrypoint。
+# entrypoint 会自动修正 /home/dev volume 权限，然后用 gosu 降权为 dev。
+USER root
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/dev-entrypoint.sh"]

@@ -11,14 +11,14 @@
 ```text
 Docker
 workspace 项目目录
-一个 dev-home 持久化 volume
+一个 codex-dev-home 持久化 volume
 ```
 
 运行时只挂载两个主要目录：
 
 ```text
 ./workspace  → /workspace
-dev-home     → /home/dev
+codex-dev-home     → /home/dev
 ```
 
 `/home/dev` 里会保存 Codex 登录态、mise 运行时、git 配置和各种语言缓存。
@@ -72,7 +72,7 @@ docker compose run --rm codex
 
 ```text
 workspace 项目目录
-dev-home 持久化 home volume
+codex-dev-home 持久化 home volume
 ```
 
 如果要清空 Codex 登录态、mise 运行时和缓存：
@@ -98,6 +98,23 @@ codex
 ```
 
 Codex 登录状态会保存在 Docker volume，不会写进镜像。
+
+
+## `/home/dev` 权限说明
+
+本镜像最终由 root 运行入口脚本，启动时会自动修正 `/home/dev` 这个持久化 volume 的权限，然后再切换到 `dev` 用户执行 shell / Codex。
+
+这样可以避免新建或旧的 Docker volume 出现：
+
+```text
+mkdir: cannot create directory ‘/home/dev/.codex’: Permission denied
+```
+
+如果你想完全重置运行环境，可以执行：
+
+```bash
+./scripts/reset-home-volume.sh
+```
 
 ## 新项目推荐提示词
 
@@ -164,6 +181,7 @@ docker pull ghcr.io/wekingchen/codex-dev-base:v0.1.0
 ./scripts/check-hardcoded.sh
 ```
 
+它会检查是否还残留 `minjue2017` 之类的旧用户名。
 
 ## 更多说明
 
