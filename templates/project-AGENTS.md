@@ -1,10 +1,10 @@
 # AGENTS.md
 
-This project runs inside the `codex-dev-base` Docker container.
+本项目运行在 `codex-dev-base` Docker 容器中。
 
-## Dependency setup rules
+## 依赖安装规则
 
-Before installing anything, inspect the project and identify its stack from:
+安装任何依赖前，先检查项目并识别技术栈：
 
 - README.md
 - package.json / pnpm-lock.yaml / yarn.lock / package-lock.json
@@ -15,33 +15,33 @@ Before installing anything, inspect the project and identify its stack from:
 - Dockerfile / compose.yaml
 - mise.toml / .tool-versions
 
-## Runtime installation
+## 语言运行时
 
-- Prefer `mise` for language/runtime versions.
-- If runtime versions are not specified, choose a current stable LTS where appropriate and write the decision down.
-- Do not install heavy SDKs globally unless the project clearly needs them.
+- 优先使用 `mise` 安装 Node、Python、Go、Rust、Java 等语言运行时。
+- 如果项目没有指定版本，优先选择当前稳定版或 LTS 版，并在执行前说明选择理由。
+- 不要把重型 SDK 全局安装到系统里，除非项目确实需要。
 
-## Dependency installation
+## 项目依赖
 
-- Use the package manager indicated by lockfiles.
-- For Node:
-  - pnpm-lock.yaml → pnpm install
-  - yarn.lock → yarn install
-  - package-lock.json → npm ci
-  - no lockfile → ask before choosing unless the task is clearly exploratory
-- For Python:
-  - Prefer venv inside the project or the project’s documented tooling.
-  - Do not install project packages globally.
-- For Go:
-  - Use go mod download / go test.
-- For Rust:
-  - Use cargo fetch / cargo test.
-- For Java:
-  - Use project wrapper first: ./gradlew or ./mvnw.
+- 根据 lockfile 选择包管理器。
+- Node 项目：
+  - `pnpm-lock.yaml` → `pnpm install`
+  - `yarn.lock` → `yarn install`
+  - `package-lock.json` → `npm ci`
+  - 没有 lockfile 时，先说明建议再继续
+- Python 项目：
+  - 优先使用项目内 venv 或项目文档指定的工具。
+  - 不要把项目依赖全局安装到系统 Python。
+- Go 项目：
+  - 使用 `go mod download` / `go test`。
+- Rust 项目：
+  - 使用 `cargo fetch` / `cargo test`。
+- Java 项目：
+  - 优先使用项目自带 wrapper：`./gradlew` 或 `./mvnw`。
 
-## Safety
+## 安全规则
 
-- Explain before using `sudo apt-get`.
-- Do not store secrets in the repository.
-- Do not modify files outside `/workspace` unless explicitly needed.
-- Keep generated build artifacts out of git unless requested.
+- 使用 `sudo apt-get` 前先说明原因。
+- 不要把密钥、token、密码写入仓库。
+- 不要修改 `/workspace` 之外的文件，除非明确需要。
+- 不要把生成的构建产物加入 git，除非用户明确要求。

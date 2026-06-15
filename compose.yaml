@@ -1,29 +1,16 @@
 services:
   codex:
-    image: ghcr.io/minjue2017/codex-dev-base:latest
+    image: ${CODEX_DEV_IMAGE:-ghcr.io/wekingchen/codex-dev-base:latest}
     working_dir: /workspace
     stdin_open: true
     tty: true
     volumes:
-      # Your projects live here. Codex can only see what you mount.
+      # 项目源码目录。
       - ./workspace:/workspace
 
-      # Persistent Codex login state. Never bake this into the image.
-      - codex-home:/home/dev/.codex
-
-      # Persistent runtime/tool/cache state.
-      - mise-data:/home/dev/.local/share/mise
-      - mise-config:/home/dev/.config/mise
-      - dev-cache:/home/dev/.cache
-      - git-config:/home/dev/.config/git
-
-      # Optional npm/pnpm/pip/go/cargo caches. They are harmless even if unused.
-      - npm-cache:/home/dev/.npm
-      - pnpm-store:/home/dev/.local/share/pnpm
-      - pip-cache:/home/dev/.cache/pip
-      - go-cache:/home/dev/go
-      - cargo-cache:/home/dev/.cargo
-      - rustup-cache:/home/dev/.rustup
+      # 单一持久化 home volume：
+      # Codex 登录态、mise 运行时、git 配置、npm/pnpm/pip/go/cargo 等缓存都会保存在这里。
+      - dev-home:/home/dev
 
     environment:
       - CODEX_HOME=/home/dev/.codex
@@ -33,14 +20,4 @@ services:
     command: bash
 
 volumes:
-  codex-home:
-  mise-data:
-  mise-config:
-  dev-cache:
-  git-config:
-  npm-cache:
-  pnpm-store:
-  pip-cache:
-  go-cache:
-  cargo-cache:
-  rustup-cache:
+  dev-home:

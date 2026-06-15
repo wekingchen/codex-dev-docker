@@ -1,43 +1,56 @@
 # AGENTS.md
 
-This repository builds a generic Codex runtime Docker image.
+本仓库用于构建 Codex 通用 Docker 运行底座镜像。
 
-## Goal
+## 目标
 
-Keep the base image small, stable, and generic. It should provide enough tools for Codex to inspect projects and install project-specific dependencies later, without baking every possible technology stack into the image.
+基础镜像应保持轻量、稳定、通用。它只需要提供让 Codex 检查项目、修改代码、执行命令、安装项目依赖所需的基础能力，不应该把所有可能的技术栈都预装进去。
 
-## Base image rules
+## 基础镜像规则
 
-- Do include Codex CLI, git, ssh client, curl/wget, sudo, build-essential, Python basics, mise, and common debugging tools.
-- Do not bake secrets, tokens, SSH private keys, or Codex login state into the image.
-- Do not add heavy stacks to the base image unless explicitly requested:
+- 应包含：
+  - Codex CLI
+  - git / git-lfs
+  - ssh client
+  - curl / wget
+  - sudo
+  - build-essential
+  - Python 基础环境
+  - mise
+  - 常用排错工具
+- 不要把以下内容写进镜像：
+  - 密钥
+  - token
+  - SSH 私钥
+  - Codex 登录状态
+- 除非明确需要，不要把重型技术栈放进基础镜像：
   - Flutter / Android SDK
-  - OpenWrt toolchains
-  - database servers
-  - browsers / Playwright dependencies
-  - large cross-compilation SDKs
-- Prefer adding heavy stacks later as derived images.
+  - OpenWrt 工具链
+  - 数据库服务端
+  - 浏览器测试环境
+  - 大型交叉编译 SDK
+- 重型技术栈后续应做成派生镜像，而不是塞进基础镜像。
 
-## Project dependency installation policy
+## 项目依赖安装规则
 
-When using this image inside a project, Codex should:
+使用此镜像进入具体项目后，Codex 应按以下顺序处理：
 
-1. Inspect project files before installing anything:
+1. 安装任何依赖前，先检查项目文件：
    - README.md
-   - package.json / pnpm-lock.yaml / yarn.lock
-   - pyproject.toml / requirements.txt
+   - package.json / pnpm-lock.yaml / yarn.lock / package-lock.json
+   - pyproject.toml / requirements.txt / poetry.lock / uv.lock
    - go.mod
-   - Cargo.toml
-   - pom.xml / build.gradle
+   - Cargo.toml / Cargo.lock
+   - pom.xml / build.gradle / gradle.lockfile
    - Dockerfile / compose.yaml
    - mise.toml / .tool-versions
-2. Prefer `mise` for language/runtime installation.
-3. Prefer project-native dependency commands:
-   - Node: npm / pnpm / yarn according to lockfile
-   - Python: venv + pip / uv / poetry according to project files
-   - Go: go mod download
-   - Rust: cargo fetch / cargo build
-4. Use `sudo apt-get` only when system packages are truly needed.
-5. Explain the plan before major dependency installation.
-6. Keep caches in mounted volumes.
-7. Do not modify host-level configuration outside mounted directories.
+2. 优先使用 `mise` 安装语言运行时。
+3. 优先使用项目自身的依赖安装方式：
+   - Node：根据 lockfile 使用 npm / pnpm / yarn
+   - Python：根据项目文件使用 venv + pip / uv / poetry
+   - Go：使用 go mod download / go test
+   - Rust：使用 cargo fetch / cargo build
+4. 只有确实需要系统包时，才使用 `sudo apt-get`。
+5. 进行大规模依赖安装前，先说明计划。
+6. 缓存应尽量落在已挂载的 volume 中。
+7. 不要修改挂载目录之外的宿主机配置。

@@ -1,20 +1,20 @@
 # syntax=docker/dockerfile:1.7
-FROM ubuntu:26.04
+FROM ubuntu:24.04
 
 ARG USERNAME=dev
 ARG USER_UID=1000
 ARG USER_GID=$USER_UID
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV LANG=en_US.UTF-8
-ENV LC_ALL=en_US.UTF-8
+ENV LANG=zh_CN.UTF-8
+ENV LC_ALL=zh_CN.UTF-8
 ENV CODEX_HOME=/home/${USERNAME}/.codex
 ENV MISE_DATA_DIR=/home/${USERNAME}/.local/share/mise
 ENV MISE_CONFIG_DIR=/home/${USERNAME}/.config/mise
-ENV PATH=/home/${USERNAME}/.local/bin:/home/${USERNAME}/.local/share/mise/shims:${PATH}
+ENV PATH=/home/${USERNAME}/.local/share/mise/shims:/usr/local/bin:/home/${USERNAME}/.local/bin:${PATH}
 
-# This image is intentionally a Codex runtime base, not a full tech-stack image.
-# Project-specific runtimes should be installed later by Codex via mise / project tooling.
+# 这个镜像只作为 Codex 通用运行底座，不预装完整技术栈。
+# 项目需要的语言运行时和依赖，后续由 Codex 根据项目内容在容器内安装。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     bash-completion \
@@ -73,8 +73,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
-# Ubuntu 24.04 base images may already contain UID/GID 1000.
-# Reuse/rename the existing account/group when needed instead of blindly creating them.
+# Ubuntu 24.04 基础镜像中可能已经存在 UID/GID 1000。
+# 这里会优先复用或重命名已有用户/用户组，避免 groupadd 因 GID 冲突导致构建失败。
 RUN set -eux; \
     if getent passwd "${USERNAME}" >/dev/null; then \
         true; \
@@ -108,19 +108,35 @@ RUN set -eux; \
 USER ${USERNAME}
 WORKDIR /home/${USERNAME}
 
-# mise: per-project runtime manager. Keep language runtimes out of the base image.
+# mise：按项目管理 Node、Python、Go、Rust、Java 等语言运行时。
+# 基础镜像不内置这些运行时，避免变成臃肿的全家桶镜像。
 RUN curl -fsSL https://mise.run | sh \
     && /home/${USERNAME}/.local/bin/mise --version
 
-# Codex CLI official standalone installer.
+USER root
+RUN install -m 0755 "/home/${USERNAME}/.local/bin/mise" /usr/local/bin/mise
+
+USER ${USERNAME}
+
+# Codex CLI 官方独立安装脚本。
 RUN CODEX_NON_INTERACTIVE=1 sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | sh' \
-    && command -v codex \
+    && command -v codex | tee /tmp/codex-path \
     && codex --version
 
+USER root
+RUN install -m 0755 "$(cat /tmp/codex-path)" /usr/local/bin/codex \
+    && rm -f /tmp/codex-path
+
+COPY scripts/dev-entrypoint.sh /usr/local/bin/dev-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/dev-entrypoint.sh
+
+USER ${USERNAME}
+
 RUN mkdir -p "${CODEX_HOME}" "${MISE_DATA_DIR}" "${MISE_CONFIG_DIR}" /home/${USERNAME}/.cache \
-    && printf '\n# mise\nif [ -x "$HOME/.local/bin/mise" ]; then\n  eval "$($HOME/.local/bin/mise activate bash)"\nfi\n\n# direnv\nif command -v direnv >/dev/null 2>&1; then\n  eval "$(direnv hook bash)"\nfi\n' >> /home/${USERNAME}/.bashrc \
-    && printf '\n# mise\nif [ -x "$HOME/.local/bin/mise" ]; then\n  eval "$($HOME/.local/bin/mise activate bash)"\nfi\n' >> /home/${USERNAME}/.profile
+    && printf '\n# mise\nif command -v mise >/dev/null 2>&1; then\n  eval "$(mise activate bash)"\nfi\n\n# direnv\nif command -v direnv >/dev/null 2>&1; then\n  eval "$(direnv hook bash)"\nfi\n' >> /home/${USERNAME}/.bashrc \
+    && printf '\n# mise\nif command -v mise >/dev/null 2>&1; then\n  eval "$(mise activate bash)"\nfi\n' >> /home/${USERNAME}/.profile
 
 WORKDIR /workspace
 
+ENTRYPOINT ["/usr/local/bin/dev-entrypoint.sh"]
 CMD ["/bin/bash"]
