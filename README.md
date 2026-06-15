@@ -164,7 +164,6 @@ docker pull ghcr.io/wekingchen/codex-dev-base:v0.1.0
 ./scripts/check-hardcoded.sh
 ```
 
-它会检查是否还残留 `minjue2017` 之类的旧用户名。
 
 ## 更多说明
 
