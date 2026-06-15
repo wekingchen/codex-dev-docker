@@ -1,0 +1,105 @@
+name: 清理 GHCR 旧镜像版本
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每周日 UTC 04:00 自动清理一次。
+    - cron: "0 4 * * 0"
+
+permissions:
+  packages: write
+  contents: read
+
+env:
+  PACKAGE_NAME: codex-dev-base
+  PACKAGE_TYPE: container
+  KEEP_RECENT_NON_RELEASE: 10
+  OWNER: ${{ github.repository_owner }}
+  DRY_RUN: "false"
+
+jobs:
+  cleanup:
+    name: 删除旧的非正式镜像版本
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 清理旧版本
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          API="https://api.github.com/users/${OWNER}/packages/${PACKAGE_TYPE}/${PACKAGE_NAME}/versions?per_page=100"
+
+          echo "正在读取镜像版本：${API}"
+
+          versions="$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$API")"
+
+          echo "$versions" > versions.json
+
+          total="$(jq 'length' versions.json)"
+          echo "读取到的版本数量：${total}"
+
+          # 按更新时间从新到旧排序。
+          jq 'sort_by(.updated_at) | reverse' versions.json > versions.sorted.json
+
+          keep_count=0
+
+          jq -c '.[]' versions.sorted.json | while read -r item; do
+            id="$(echo "$item" | jq -r '.id')"
+            updated_at="$(echo "$item" | jq -r '.updated_at')"
+            tags="$(echo "$item" | jq -r '.metadata.container.tags // [] | join(",")')"
+
+            keep=false
+
+            if [ -n "$tags" ]; then
+              IFS=',' read -ra tag_array <<< "$tags"
+
+              for tag in "${tag_array[@]}"; do
+                # latest 永远保留。
+                if [ "$tag" = "latest" ]; then
+                  keep=true
+                fi
+
+                # v0.1.0 / v1.2.3 这种正式版本永远保留。
+                if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                  keep=true
+                fi
+
+                # 0.1.0 / 1.2.3 这种正式版本也永远保留。
+                if [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                  keep=true
+                fi
+              done
+            fi
+
+            # 非正式版本保留最近 N 个。
+            if [ "$keep" = false ] && [ "$keep_count" -lt "$KEEP_RECENT_NON_RELEASE" ]; then
+              keep=true
+              keep_count=$((keep_count + 1))
+            fi
+
+            if [ "$keep" = true ]; then
+              echo "保留：id=${id} 更新时间=${updated_at} 标签=[${tags}]"
+            else
+              echo "准备删除：id=${id} 更新时间=${updated_at} 标签=[${tags}]"
+
+              if [ "${DRY_RUN}" = "true" ]; then
+                echo "当前是演练模式，不执行删除。"
+              else
+                curl -fsSL \
+                  -X DELETE \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "Authorization: Bearer ${GH_TOKEN}" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  "https://api.github.com/users/${OWNER}/packages/${PACKAGE_TYPE}/${PACKAGE_NAME}/versions/${id}"
+
+                echo "已删除版本：id=${id}"
+              fi
+            fi
+          done
