@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - name: 拉取仓库代码
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: 配置 QEMU 多架构支持
         uses: docker/setup-qemu-action@v4
