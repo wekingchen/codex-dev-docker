@@ -15,6 +15,7 @@ ARG CODEX_RELEASE_TAG=latest
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=zh_CN.UTF-8
 ENV LC_ALL=zh_CN.UTF-8
+ENV HOME=/home/${USERNAME}
 ENV DEV_USER=${USERNAME}
 ENV DEV_HOME=/home/${USERNAME}
 ENV CODEX_HOME=/home/${USERNAME}/.codex
@@ -112,7 +113,9 @@ RUN set -eux; \
     usermod -aG sudo "${USERNAME}"; \
     echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}; \
     chmod 0440 /etc/sudoers.d/${USERNAME}; \
-    mkdir -p /workspace "/home/${USERNAME}"; \
+    mkdir -p /workspace \
+        "/home/${USERNAME}/.codex" \
+        "/home/${USERNAME}/.local/bin"; \
     chown -R "${USERNAME}:${USERNAME}" /workspace "/home/${USERNAME}"
 
 USER root
