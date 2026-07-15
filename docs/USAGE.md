@@ -1,172 +1,252 @@
 # 使用说明
 
-## 1. 用 GitHub Actions 构建镜像
+## 1. 初始化本地配置
 
-把本仓库推送到 GitHub 后，Actions 会发布镜像：
+`.env` 是本地文件，不受 Git 跟踪：
 
-```text
-ghcr.io/<你的 GitHub 用户名>/codex-dev-base:latest
-ghcr.io/<你的 GitHub 用户名>/codex-dev-base:YYYYMMDD
-ghcr.io/<你的 GitHub 用户名>/codex-dev-base:<短 commit>
+```bash
+cp .env.example .env
 ```
 
-如果推送 Git tag，例如：
+默认内容：
 
-```text
-v0.1.0
-```
-
-还会额外发布：
-
-```text
-ghcr.io/<你的 GitHub 用户名>/codex-dev-base:v0.1.0
-ghcr.io/<你的 GitHub 用户名>/codex-dev-base:0.1.0
-```
-
-本模板默认镜像地址集中写在 `.env`：
-
-```text
+```dotenv
 CODEX_DEV_IMAGE=ghcr.io/wekingchen/codex-dev-base:latest
+HOME_VOLUME=codex-dev-home
+WORKSPACE=./workspace
+CODEX_DEV_PULL_POLICY=always
 ```
 
-如果你的 GitHub 用户名或镜像名不同，只需要修改 `.env`。
+变量优先级遵循 Docker Compose：调用进程环境高于 `.env`，`.env` 高于 Compose 中的默认值。脚本不会 `source .env`，因此配置文件不会作为宿主机 shell 代码执行。
 
-## 2. 本地运行
+## 2. 本地启动
+
+推荐入口：
 
 ```bash
 mkdir -p workspace
-docker compose run --rm codex
-```
-
-或者：
-
-```bash
 ./scripts/run.sh
 ```
 
-当前版本采用极简挂载：
+等价的 Compose 入口：
 
-```text
-./workspace  → /workspace
-codex-dev-home     → /home/dev
+```bash
+docker compose run --rm codex
 ```
 
-`/home/dev` 会统一保存 Codex 登录态、mise、git 配置和各种语言缓存。
+只拉取镜像：
 
-## 3. 使用 SSH Agent 访问私有仓库
+```bash
+./scripts/pull-latest.sh
+```
 
-宿主机先启动 ssh-agent 并添加密钥：
+默认每次启动都会检查 GHCR 的 `latest`。离线时可以设置：
+
+```dotenv
+CODEX_DEV_PULL_POLICY=missing
+```
+
+挂载关系：
+
+```text
+${WORKSPACE:-./workspace} → /workspace
+${HOME_VOLUME:-codex-dev-home} → /home/dev
+```
+
+## 3. Codex 官方 latest
+
+Dockerfile 只调用 OpenAI 官方安装入口：
+
+```text
+https://chatgpt.com/codex/install.sh
+```
+
+CI 发布过程：
+
+1. 查询 `openai/codex` 官方 GitHub `releases/latest`。
+2. 把 release ID、tag 和规范化版本作为动态 build args。
+3. release 身份进入 Codex 安装 `RUN` 层，防止 BuildKit 缓存旧版本。
+4. 构建并运行 amd64、arm64 smoke test。
+5. 推送唯一 candidate manifest，并按 digest 再验证两个架构。
+6. 发布前再次查询官方 latest；如果 release ID 已变化则停止 promotion。
+7. 仅将验证过的 candidate digest 提升为正式标签。
+
+本地直接构建且不传 build args 时，Dockerfile 的 `CODEX_RELEASE` 默认为 `latest`，仍由官方 installer 解析当前 latest。
+
+## 4. Home volume 迁移
+
+旧 Compose 配置没有显式 volume `name`，实际名称可能带项目名前缀。先查询：
+
+```bash
+docker volume ls
+```
+
+停止使用源或目标 volume 的容器，然后迁移：
+
+```bash
+./scripts/migrate-home-volume.sh <旧-volume-名称> codex-dev-home
+```
+
+迁移脚本会：
+
+- 验证源 volume 存在。
+- 拒绝源、目标相同。
+- 拒绝迁移仍被容器使用的 volume。
+- 创建缺失的目标 volume。
+- 拒绝覆盖或合并非空目标。
+- 保留 dotfiles 和文件元数据。
+- 比较源、目标文件系统对象数量。
+- 永不删除源 volume。
+
+迁移后检查：
+
+```bash
+codex --version
+mise --version
+git config --list
+```
+
+确认 Codex 登录状态和所需 runtime 正常。回滚时只需在本地 `.env` 中指定旧名称：
+
+```dotenv
+HOME_VOLUME=<旧-volume-名称>
+```
+
+## 5. 重置 Home volume
+
+```bash
+./scripts/reset-home-volume.sh codex-dev-home
+```
+
+脚本要求显式传入实际 Docker volume 名并输入 `DELETE <volume-name>`。它会先停止本项目容器、检查是否仍有其他容器引用目标、直接删除并再次复核。不要对仍需保留的登录状态或 runtime 执行该操作。
+
+## 6. SSH Agent
 
 ```bash
 eval "$(ssh-agent -s)"
 ssh-add ~/.ssh/id_ed25519
-```
-
-然后运行：
-
-```bash
 ./scripts/run-with-ssh-agent.sh
 ```
 
-这种方式不会把 SSH 私钥文件直接挂进容器，安全性更好。
+脚本要求 `SSH_AUTH_SOCK` 存在且确实是 Unix socket。它只挂载 agent socket，不挂载私钥文件。容器内可验证：
 
-## 4. 第一次登录 Codex
+```bash
+ssh-add -l
+```
 
-进入容器后执行：
+任何能访问 socket 的容器进程都可以请求 agent 完成认证或签名，因此只应在可信项目中启用。
+
+## 7. Linux UID/GID
+
+原生 Linux 上，包装脚本自动传递宿主用户的 UID/GID。entrypoint 会：
+
+1. 要求 `HOST_UID`、`HOST_GID` 同时存在且为非零整数。
+2. 安全复用已存在的目标 GID。
+3. 如果目标 UID 被其他用户占用则停止启动。
+4. 调整 `dev` 用户身份。
+5. 只递归修复 `/home/dev`。
+6. 通过 `gosu dev` 执行用户命令。
+
+它不会修改 `/workspace` 的宿主机所有权。macOS/Windows 默认不启用自动 UID/GID 重映射。
+
+## 8. 第一次登录和项目依赖
+
+进入容器后：
 
 ```bash
 codex
 ```
 
-Codex 登录状态会保存在 `codex-dev-home` 这个 Docker volume 中：
+登录状态保存在 `/home/dev/.codex`。
 
-```text
-codex-dev-home:/home/dev
-```
+建议让 Codex 先读取 README、lockfile、`package.json`、`pyproject.toml`、`go.mod`、`Cargo.toml`、`Dockerfile`、`mise.toml`，再通过 mise 和项目原生包管理器安装依赖。
 
-不要把登录状态写进镜像。
-
-
-## `/home/dev` 权限修复
-
-容器启动时入口脚本会自动修复 `/home/dev` 的属主，然后降权为 `dev` 用户运行。
-
-如果你看到类似错误：
-
-```text
-mkdir: cannot create directory ‘/home/dev/.codex’: Permission denied
-```
-
-请确认已经使用包含此修复的新镜像重新构建并拉取：
-
-```bash
-docker pull ghcr.io/wekingchen/codex-dev-base:latest
-```
-
-如果仍然异常，可以重置 home volume：
-
-```bash
-./scripts/reset-home-volume.sh
-```
-
-## 5. 让 Codex 按项目安装依赖
-
-进入项目目录后，可以对 Codex 说：
-
-```text
-请检查当前项目需要的技术栈和依赖。优先读取 README、package.json、pyproject.toml、go.mod、Cargo.toml、Dockerfile、mise.toml。需要语言运行时时优先用 mise 安装；项目依赖按项目官方方式安装。不要改动系统级配置，除非必要。安装前先说明计划，遇到需要 sudo apt 安装时先告诉我。
-```
-
-## 6. 给具体项目添加 AGENTS.md
-
-新项目可以复制模板：
+新项目可以复制指令模板：
 
 ```bash
 cp templates/project-AGENTS.md workspace/你的项目/AGENTS.md
 ```
 
-Codex 会把它作为项目级指令读取。
+## 9. GitHub Actions 发布
 
-## 7. 发布正式版本
+PR 只运行静态检查和双架构构建/smoke，不登录或推送 GHCR。
 
-创建并推送 Git tag：
-
-```bash
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
-```
-
-构建成功后可以固定使用：
-
-```bash
-docker pull ghcr.io/wekingchen/codex-dev-base:v0.1.0
-```
-
-## 8. 清理旧镜像版本
-
-仓库包含自动清理 workflow：
+受信任事件先发布：
 
 ```text
-.github/workflows/cleanup-ghcr.yml
+candidate-<run-id>-<run-attempt>
 ```
 
-默认保留：
+验证通过且官方 latest 未变化后，再提升为：
 
 ```text
 latest
-v0.1.0 这类正式版本
-0.1.0 这类正式版本
-最近 10 个非正式版本
+YYYYMMDD
+<短-commit>
 ```
 
-如需先演练不删除，把 workflow 里的：
+Git tag 构建还会增加：
 
 ```text
-DRY_RUN: "false"
+v0.1.0
+0.1.0
 ```
 
-改成：
+为避免在旧 commit 上补打版本 tag 时回退 `latest`，tag 构建不会移动 `latest`。手动 workflow 的 `promote` 默认为 `false`，适合先演练完整 candidate 流程。
 
-```text
-DRY_RUN: "true"
+## 10. GHCR 安全清理
+
+清理 workflow 会：
+
+- 根据 owner 类型选择 User 或 Organization API。
+- 分页读取超过 100 个版本。
+- 保护 latest、semver、未知标签和 untagged/referrer。
+- 只清理旧 candidate、日期和 commit 临时标签。
+- 保留最近 10 个临时版本。
+- 限制单次删除数量，硬上限为 10。
+
+每周 schedule 当前固定 dry-run。手动真实删除时：
+
+1. 设置 `dry_run=false`。
+2. 设置较小的 `max_delete`，首次建议为 1。
+3. 在 `confirm` 中精确填写 `codex-dev-base`。
+4. 执行后到 GHCR 人工核对结果。
+
+## 11. 验证命令
+
+静态检查：
+
+```bash
+bash -n scripts/*.sh
+shellcheck scripts/*.sh
+./scripts/check-hardcoded.sh
+git diff --check
+```
+
+Compose：
+
+```bash
+docker compose config
+docker compose config --volumes
+```
+
+本地镜像 smoke：
+
+```bash
+./scripts/smoke-image.sh <镜像引用> <期望-Codex-版本> linux/amd64
+```
+
+原生 Linux UID/GID 验证：
+
+```bash
+./scripts/run.sh
+```
+
+容器内：
+
+```bash
+id
+touch /workspace/.uid-test
+stat -c '%u:%g %n' /workspace/.uid-test
+rm /workspace/.uid-test
 ```

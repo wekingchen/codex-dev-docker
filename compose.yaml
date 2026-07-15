@@ -1,23 +1,31 @@
 services:
   codex:
     image: ${CODEX_DEV_IMAGE:-ghcr.io/wekingchen/codex-dev-base:latest}
+    pull_policy: ${CODEX_DEV_PULL_POLICY:-always}
     working_dir: /workspace
     stdin_open: true
     tty: true
     volumes:
       # 项目源码目录。
-      - ./workspace:/workspace
+      - type: bind
+        source: ${WORKSPACE:-./workspace}
+        target: /workspace
 
       # 单一持久化 home volume：
       # Codex 登录态、mise 运行时、git 配置、npm/pnpm/pip/go/cargo 等缓存都会保存在这里。
-      - codex-dev-home:/home/dev
+      - type: volume
+        source: codex-dev-home
+        target: /home/dev
 
     environment:
-      - CODEX_HOME=/home/dev/.codex
-      - MISE_DATA_DIR=/home/dev/.local/share/mise
-      - MISE_CONFIG_DIR=/home/dev/.config/mise
+      CODEX_HOME: /home/dev/.codex
+      MISE_DATA_DIR: /home/dev/.local/share/mise
+      MISE_CONFIG_DIR: /home/dev/.config/mise
+      HOST_UID: ${HOST_UID:-}
+      HOST_GID: ${HOST_GID:-}
 
     command: bash
 
 volumes:
   codex-dev-home:
+    name: ${HOME_VOLUME:-codex-dev-home}

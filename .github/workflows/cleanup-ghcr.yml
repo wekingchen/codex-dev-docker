@@ -2,104 +2,194 @@ name: 清理 GHCR 旧镜像版本
 
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 只列出候选，不执行删除
+        required: true
+        default: true
+        type: boolean
+      max_delete:
+        description: 本次最多删除数量（硬上限 10）
+        required: true
+        default: "1"
+        type: string
+      confirm:
+        description: 真正删除时必须填写 codex-dev-base
+        required: false
+        default: ""
+        type: string
   schedule:
-    # 每周日 UTC 04:00 自动清理一次。
-    - cron: "0 4 * * 0"
+    # 每周日 UTC 04:07 自动演练；确认策略稳定后再单独启用真实删除。
+    - cron: "7 4 * * 0"
 
 permissions:
   packages: write
   contents: read
+
+concurrency:
+  group: codex-dev-package-${{ github.repository }}
+  cancel-in-progress: false
 
 env:
   PACKAGE_NAME: codex-dev-base
   PACKAGE_TYPE: container
   KEEP_RECENT_NON_RELEASE: 10
   OWNER: ${{ github.repository_owner }}
-  DRY_RUN: "false"
+  HARD_MAX_DELETE: 10
 
 jobs:
   cleanup:
-    name: 删除旧的非正式镜像版本
+    name: 安全清理旧的临时镜像版本
     runs-on: ubuntu-latest
 
     steps:
-      - name: 清理旧版本
+      - name: 分页读取、分类并清理旧版本
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_MAX_DELETE: ${{ inputs.max_delete }}
+          INPUT_CONFIRM: ${{ inputs.confirm }}
         shell: bash
         run: |
           set -euo pipefail
 
-          API="https://api.github.com/users/${OWNER}/packages/${PACKAGE_TYPE}/${PACKAGE_NAME}/versions?per_page=100"
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            dry_run=true
+            max_delete=5
+            confirm=""
+          else
+            dry_run="${INPUT_DRY_RUN:-true}"
+            max_delete="${INPUT_MAX_DELETE:-1}"
+            confirm="${INPUT_CONFIRM:-}"
+          fi
 
-          echo "正在读取镜像版本：${API}"
+          case "$max_delete" in
+            0|1|2|3|4|5|6|7|8|9|10) ;;
+            *)
+              echo "max_delete 只允许 0 到 $HARD_MAX_DELETE：$max_delete" >&2
+              exit 1
+              ;;
+          esac
 
-          versions="$(curl -fsSL \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "$API")"
+          if [ "$dry_run" != "true" ] && [ "$dry_run" != "false" ]; then
+            echo "dry_run 只能是 true 或 false。" >&2
+            exit 1
+          fi
 
-          echo "$versions" > versions.json
+          if [ "$dry_run" = "false" ] && [ "$confirm" != "$PACKAGE_NAME" ]; then
+            echo "真正删除时，confirm 必须精确填写 $PACKAGE_NAME。" >&2
+            exit 1
+          fi
+
+          owner_type="$(gh api "/users/${OWNER}" --jq '.type')"
+          case "$owner_type" in
+            User) owner_scope="users" ;;
+            Organization) owner_scope="orgs" ;;
+            *)
+              echo "不支持的 owner 类型：$owner_type" >&2
+              exit 1
+              ;;
+          esac
+
+          api_base="/${owner_scope}/${OWNER}/packages/${PACKAGE_TYPE}/${PACKAGE_NAME}/versions"
+          printf '[]\n' > versions.json
+          page=1
+
+          while :; do
+            echo "正在读取第 $page 页：$api_base"
+            page_file="versions.page-${page}.json"
+            gh api "${api_base}?per_page=100&page=${page}" > "$page_file"
+            page_count="$(jq 'length' "$page_file")"
+
+            jq -s '.[0] + .[1]' versions.json "$page_file" > versions.next.json
+            mv versions.next.json versions.json
+
+            if [ "$page_count" -lt 100 ]; then
+              break
+            fi
+            page=$((page + 1))
+          done
 
           total="$(jq 'length' versions.json)"
-          echo "读取到的版本数量：${total}"
+          echo "读取到的版本总数：$total"
 
-          # 按更新时间从新到旧排序。
-          jq 'sort_by(.updated_at) | reverse' versions.json > versions.sorted.json
+          jq '
+            def is_semver:
+              test("^v?[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$");
+            def is_temporary:
+              test("^candidate-[0-9]+-[0-9]+$") or
+              test("^[0-9]{8}$") or
+              test("^[0-9a-f]{7,40}$");
 
-          keep_count=0
+            map(
+              (.metadata.container.tags // []) as $tags |
+              . + {
+                tags: $tags,
+                cleanup_class: (
+                  if ($tags | length) == 0 then
+                    "protected-untagged"
+                  elif any($tags[]; . == "latest" or is_semver) then
+                    "protected-release"
+                  elif all($tags[]; is_temporary) then
+                    "eligible-temporary"
+                  else
+                    "protected-unknown"
+                  end
+                )
+              }
+            )
+          ' versions.json > versions.classified.json
 
-          jq -c '.[]' versions.sorted.json | while read -r item; do
-            id="$(echo "$item" | jq -r '.id')"
-            updated_at="$(echo "$item" | jq -r '.updated_at')"
-            tags="$(echo "$item" | jq -r '.metadata.container.tags // [] | join(",")')"
+          jq '[.[] | select(.cleanup_class == "eligible-temporary")] | sort_by(.updated_at) | reverse' \
+            versions.classified.json > eligible.json
+          jq '[.[] | select(.cleanup_class != "eligible-temporary")] | sort_by(.updated_at) | reverse' \
+            versions.classified.json > protected.json
 
-            keep=false
+          eligible_total="$(jq 'length' eligible.json)"
+          protected_total="$(jq 'length' protected.json)"
+          jq --argjson keep "$KEEP_RECENT_NON_RELEASE" '.[$keep:]' eligible.json > delete-candidates.json
+          candidate_total="$(jq 'length' delete-candidates.json)"
 
-            if [ -n "$tags" ]; then
-              IFS=',' read -ra tag_array <<< "$tags"
+          if [ "$candidate_total" -lt "$max_delete" ]; then
+            delete_limit="$candidate_total"
+          else
+            delete_limit="$max_delete"
+          fi
 
-              for tag in "${tag_array[@]}"; do
-                # latest 永远保留。
-                if [ "$tag" = "latest" ]; then
-                  keep=true
-                fi
+          echo "受保护版本：$protected_total"
+          echo "临时版本：$eligible_total（保留最新 $KEEP_RECENT_NON_RELEASE 个）"
+          echo "符合删除条件：$candidate_total"
+          echo "本次最多处理：$delete_limit"
+          echo "演练模式：$dry_run"
 
-                # v0.1.0 / v1.2.3 这种正式版本永远保留。
-                if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                  keep=true
-                fi
+          echo "受保护版本摘要："
+          jq -r '.[] | "  保留 id=\(.id) class=\(.cleanup_class) tags=\(.tags | join(","))"' protected.json
 
-                # 0.1.0 / 1.2.3 这种正式版本也永远保留。
-                if [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                  keep=true
-                fi
-              done
-            fi
+          if [ "$delete_limit" -gt 0 ]; then
+            jq -c --argjson limit "$delete_limit" '.[:$limit][]' delete-candidates.json | while IFS= read -r item; do
+              id="$(jq -r '.id' <<< "$item")"
+              updated_at="$(jq -r '.updated_at' <<< "$item")"
+              tags="$(jq -r '.tags | join(",")' <<< "$item")"
+              echo "删除候选：id=$id 更新时间=$updated_at 标签=[$tags]"
 
-            # 非正式版本保留最近 N 个。
-            if [ "$keep" = false ] && [ "$keep_count" -lt "$KEEP_RECENT_NON_RELEASE" ]; then
-              keep=true
-              keep_count=$((keep_count + 1))
-            fi
-
-            if [ "$keep" = true ]; then
-              echo "保留：id=${id} 更新时间=${updated_at} 标签=[${tags}]"
-            else
-              echo "准备删除：id=${id} 更新时间=${updated_at} 标签=[${tags}]"
-
-              if [ "${DRY_RUN}" = "true" ]; then
+              if [ "$dry_run" = "true" ]; then
                 echo "当前是演练模式，不执行删除。"
               else
-                curl -fsSL \
-                  -X DELETE \
-                  -H "Accept: application/vnd.github+json" \
-                  -H "Authorization: Bearer ${GH_TOKEN}" \
-                  -H "X-GitHub-Api-Version: 2022-11-28" \
-                  "https://api.github.com/users/${OWNER}/packages/${PACKAGE_TYPE}/${PACKAGE_NAME}/versions/${id}"
-
-                echo "已删除版本：id=${id}"
+                gh api --method DELETE "${api_base}/${id}"
+                echo "已删除版本：id=$id"
               fi
-            fi
-          done
+            done
+          fi
+
+          deferred=$((candidate_total - delete_limit))
+          {
+            echo "### GHCR cleanup"
+            echo "- Owner type: \`$owner_type\`"
+            echo "- 总版本数：$total"
+            echo "- 受保护：$protected_total"
+            echo "- 临时版本：$eligible_total"
+            echo "- 删除候选：$candidate_total"
+            echo "- 本次处理上限：$delete_limit"
+            echo "- 延后处理：$deferred"
+            echo "- Dry run: \`$dry_run\`"
+          } >> "$GITHUB_STEP_SUMMARY"

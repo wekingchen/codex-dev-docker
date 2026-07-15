@@ -4,6 +4,9 @@ FROM ubuntu:26.04
 ARG USERNAME=dev
 ARG USER_UID=1000
 ARG USER_GID=$USER_UID
+ARG CODEX_RELEASE=latest
+ARG CODEX_RELEASE_ID=latest
+ARG CODEX_RELEASE_TAG=latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=zh_CN.UTF-8
@@ -76,7 +79,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
-# Ubuntu 24.04 基础镜像中可能已经存在 UID/GID 1000。
+# Ubuntu 基础镜像中可能已经存在 UID/GID 1000。
 # 这里会优先复用或重命名已有用户/用户组，避免 groupadd 因 GID 冲突导致构建失败。
 RUN set -eux; \
     if getent passwd "${USERNAME}" >/dev/null; then \
@@ -121,14 +124,24 @@ RUN install -m 0755 "/home/${USERNAME}/.local/bin/mise" /usr/local/bin/mise
 
 USER ${USERNAME}
 
-# Codex CLI 官方独立安装脚本。
-RUN CODEX_NON_INTERACTIVE=1 sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | sh' \
+# Codex CLI 始终通过 OpenAI 官方独立安装脚本安装。
+# CI 动态传入当时的官方 latest；release 身份进入本层缓存键，避免复用旧 Codex 层。
+RUN echo "Installing official Codex release ${CODEX_RELEASE_TAG} (id=${CODEX_RELEASE_ID}, version=${CODEX_RELEASE})" \
+    && CODEX_NON_INTERACTIVE=1 \
+       CODEX_RELEASE="${CODEX_RELEASE}" \
+       CODEX_INSTALL_DIR="/home/${USERNAME}/.local/bin" \
+       sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | sh' \
     && command -v codex | tee /tmp/codex-path \
     && codex --version
 
 USER root
 RUN install -m 0755 "$(cat /tmp/codex-path)" /usr/local/bin/codex \
     && rm -f /tmp/codex-path
+
+LABEL io.codex-dev.codex.source="https://github.com/openai/codex" \
+      io.codex-dev.codex.release-id="${CODEX_RELEASE_ID}" \
+      io.codex-dev.codex.release-tag="${CODEX_RELEASE_TAG}" \
+      io.codex-dev.codex.version="${CODEX_RELEASE}"
 
 COPY scripts/dev-entrypoint.sh /usr/local/bin/dev-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/dev-entrypoint.sh

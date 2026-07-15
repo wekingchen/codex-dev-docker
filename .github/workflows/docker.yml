@@ -1,6 +1,7 @@
 name: 构建 Codex 通用运行镜像
 
 on:
+  pull_request:
   push:
     branches:
       - main
@@ -8,21 +9,202 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      promote:
+        description: 验证 candidate 后是否移动正式标签
+        required: true
+        default: false
+        type: boolean
   schedule:
-    # 每天 UTC 03:00 自动重建，保持 Codex CLI 和系统包相对新鲜。
-    - cron: "0 3 * * *"
+    # 每天 UTC 03:07 检查并构建当时的 Codex 官方 latest。
+    - cron: "7 3 * * *"
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: codex-dev-package-${{ github.repository }}
+  cancel-in-progress: false
 
 env:
   IMAGE_BASENAME: codex-dev-base
 
 jobs:
-  build-base:
-    name: 构建并发布基础镜像
+  resolve-codex-latest:
+    name: 解析 Codex 官方 latest
     runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      version: ${{ steps.release.outputs.version }}
+      published_at: ${{ steps.release.outputs.published_at }}
+
+    steps:
+      - name: 查询 openai/codex 官方 release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          response="$(curl --fail --silent --show-error --retry 3 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/openai/codex/releases/latest)"
+
+          release_id="$(jq -r '.id // empty' <<< "$response")"
+          release_tag="$(jq -r '.tag_name // empty' <<< "$response")"
+          published_at="$(jq -r '.published_at // empty' <<< "$response")"
+
+          if ! [[ "$release_id" =~ ^[0-9]+$ ]]; then
+            echo "官方 release id 无效：$release_id" >&2
+            exit 1
+          fi
+
+          if ! [[ "$release_tag" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "官方 release tag 格式异常：$release_tag" >&2
+            exit 1
+          fi
+
+          version="${release_tag#rust-v}"
+
+          if [ -z "$published_at" ]; then
+            echo "官方 release 缺少 published_at。" >&2
+            exit 1
+          fi
+
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "published_at=$published_at" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Codex 官方 latest"
+            echo "- Release ID: \`$release_id\`"
+            echo "- Tag: \`$release_tag\`"
+            echo "- Version: \`$version\`"
+            echo "- Published: \`$published_at\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  static:
+    name: 静态检查
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@v7
+
+      - name: 检查 Shell 脚本
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/*.sh
+          shellcheck scripts/*.sh
+
+      - name: 检查脚本执行权限和本地配置
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bad_modes="$(git ls-files -s 'scripts/*.sh' | awk '$1 != "100755" { print }')"
+          if [ -n "$bad_modes" ]; then
+            echo "以下脚本没有以 100755 跟踪：" >&2
+            echo "$bad_modes" >&2
+            exit 1
+          fi
+
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo ".env 不应受 Git 跟踪，请只提交 .env.example。" >&2
+            exit 1
+          fi
+
+      - name: 检查 Compose 配置
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose \
+            --project-directory "$GITHUB_WORKSPACE" \
+            -f "$GITHUB_WORKSPACE/compose.yaml" \
+            config >/dev/null
+
+      - name: 从仓库外执行硬编码检查
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp
+          "$GITHUB_WORKSPACE/scripts/check-hardcoded.sh"
+
+      - name: 检查空白错误
+        run: git diff --check
+
+  platform-smoke:
+    name: 构建并验证 ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    needs:
+      - resolve-codex-latest
+      - static
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            name: amd64
+          - platform: linux/arm64
+            name: arm64
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@v7
+
+      - name: 配置 QEMU 多架构支持
+        uses: docker/setup-qemu-action@v4
+
+      - name: 配置 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 构建本地验证镜像
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: base/Dockerfile
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: codex-dev-smoke:${{ matrix.name }}
+          build-args: |
+            CODEX_RELEASE=${{ needs.resolve-codex-latest.outputs.version }}
+            CODEX_RELEASE_ID=${{ needs.resolve-codex-latest.outputs.release_id }}
+            CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=codex-dev-base
+            org.opencontainers.image.description=Codex 通用 Docker 运行底座。项目依赖由 Codex 后续在容器内按需安装。
+          cache-from: type=gha,scope=codex-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=codex-${{ matrix.name }}
+
+      - name: 运行镜像 smoke test
+        run: |
+          ./scripts/smoke-image.sh \
+            codex-dev-smoke:${{ matrix.name }} \
+            "${{ needs.resolve-codex-latest.outputs.version }}" \
+            "${{ matrix.platform }}"
+
+  publish-candidate:
+    name: 发布双架构 candidate
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    needs:
+      - resolve-codex-latest
+      - static
+      - platform-smoke
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_name: ${{ steps.meta.outputs.image_name }}
+      candidate_tag: ${{ steps.meta.outputs.candidate_tag }}
+      digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: 拉取仓库代码
@@ -41,47 +223,171 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 生成镜像标签
+      - name: 生成 candidate 信息
         id: meta
         shell: bash
         run: |
-          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          IMAGE_NAME="ghcr.io/${OWNER_LC}/${IMAGE_BASENAME}"
-          DATE_TAG="$(date -u +"%Y%m%d")"
-          SHORT_SHA="${GITHUB_SHA::7}"
+          set -euo pipefail
+          owner_lc="$(tr '[:upper:]' '[:lower:]' <<< "$GITHUB_REPOSITORY_OWNER")"
+          image_name="ghcr.io/${owner_lc}/${IMAGE_BASENAME}"
+          candidate_tag="candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "image_name=$image_name" >> "$GITHUB_OUTPUT"
+          echo "candidate_tag=$candidate_tag" >> "$GITHUB_OUTPUT"
 
-          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
-
-          {
-            echo "image_tags<<EOF"
-            echo "${IMAGE_NAME}:latest"
-            echo "${IMAGE_NAME}:${DATE_TAG}"
-            echo "${IMAGE_NAME}:${SHORT_SHA}"
-
-            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-              echo "${IMAGE_NAME}:${GITHUB_REF_NAME}"
-
-              # 例如 v0.1.0 同时发布 0.1.0，方便两种使用习惯。
-              if [[ "${GITHUB_REF_NAME}" == v* ]]; then
-                echo "${IMAGE_NAME}:${GITHUB_REF_NAME#v}"
-              fi
-            fi
-
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: 构建并推送基础镜像
+      - name: 构建并推送 candidate
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           file: base/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.image_tags }}
+          tags: ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.candidate_tag }}
           provenance: false
+          build-args: |
+            CODEX_RELEASE=${{ needs.resolve-codex-latest.outputs.version }}
+            CODEX_RELEASE_ID=${{ needs.resolve-codex-latest.outputs.release_id }}
+            CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.title=codex-dev-base
             org.opencontainers.image.description=Codex 通用 Docker 运行底座。项目依赖由 Codex 后续在容器内按需安装。
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: |
+            type=gha,scope=codex-amd64
+            type=gha,scope=codex-arm64
+            type=gha,scope=codex-publish
+          cache-to: type=gha,mode=max,scope=codex-publish
+
+      - name: 记录 candidate digest
+        shell: bash
+        run: |
+          {
+            echo "### Candidate"
+            echo "- Image: \`${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.candidate_tag }}\`"
+            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-candidate:
+    name: 验证 registry candidate ${{ matrix.platform }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    needs:
+      - resolve-codex-latest
+      - publish-candidate
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+          - platform: linux/arm64
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@v7
+
+      - name: 配置 QEMU 多架构支持
+        uses: docker/setup-qemu-action@v4
+
+      - name: 登录 GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 按 digest 运行 smoke test
+        run: |
+          ./scripts/smoke-image.sh \
+            "${{ needs.publish-candidate.outputs.image_name }}@${{ needs.publish-candidate.outputs.digest }}" \
+            "${{ needs.resolve-codex-latest.outputs.version }}" \
+            "${{ matrix.platform }}"
+
+  promote:
+    name: 提升 candidate 为正式标签
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.event_name != 'workflow_dispatch' || inputs.promote)
+    runs-on: ubuntu-latest
+    needs:
+      - resolve-codex-latest
+      - publish-candidate
+      - verify-candidate
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: 配置 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 发布前确认官方 latest 未变化
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_RELEASE_ID: ${{ needs.resolve-codex-latest.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_release_id="$(curl --fail --silent --show-error --retry 3 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/openai/codex/releases/latest | jq -r '.id // empty')"
+
+          if [ "$current_release_id" != "$EXPECTED_RELEASE_ID" ]; then
+            echo "Codex 官方 latest 在构建期间发生变化。" >&2
+            echo "开始构建时：$EXPECTED_RELEASE_ID，当前：$current_release_id" >&2
+            echo "为避免发布过期版本，本次不移动正式标签。" >&2
+            exit 1
+          fi
+
+      - name: 按已验证 digest 创建正式标签
+        env:
+          IMAGE_NAME: ${{ needs.publish-candidate.outputs.image_name }}
+          DIGEST: ${{ needs.publish-candidate.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          date_tag="$(date -u +'%Y%m%d')"
+          short_sha="${GITHUB_SHA::7}"
+          source_ref="${IMAGE_NAME}@${DIGEST}"
+          tags=("${IMAGE_NAME}:${short_sha}")
+
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            # 版本 tag 可能补打在较旧 commit 上，因此不能让它回退 latest。
+            tags+=("${IMAGE_NAME}:${GITHUB_REF_NAME}")
+            if [[ "$GITHUB_REF_NAME" == v* ]]; then
+              tags+=("${IMAGE_NAME}:${GITHUB_REF_NAME#v}")
+            fi
+          else
+            tags+=(
+              "${IMAGE_NAME}:latest"
+              "${IMAGE_NAME}:${date_tag}"
+            )
+          fi
+
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=(--tag "$tag")
+          done
+
+          docker buildx imagetools create "${tag_args[@]}" "$source_ref"
+          docker buildx imagetools inspect "${tags[0]}"
+
+          {
+            echo "### 已提升正式标签"
+            echo "- Source: \`$source_ref\`"
+            for tag in "${tags[@]}"; do
+              echo "- \`$tag\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
