@@ -40,7 +40,7 @@ env:
 jobs:
   cleanup:
     name: 安全清理旧的临时镜像版本
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: 分页读取、分类并清理旧版本

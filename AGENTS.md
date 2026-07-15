@@ -54,3 +54,14 @@
 5. 进行大规模依赖安装前，先说明计划。
 6. 缓存应尽量落在已挂载的 volume 中。
 7. 不要修改挂载目录之外的宿主机配置。
+
+## 供应链规则
+
+- GitHub Actions 必须固定到官方仓库的完整 40 位 commit SHA，并在同行保留精确版本注释。
+- GitHub-hosted runner 必须固定明确的 Ubuntu 版本标签，不使用 `ubuntu-latest`。
+- Docker 基础镜像必须同时保留可读 tag 和经过验证的多架构根 index digest；禁止使用单平台子 manifest digest替代根 index。
+- 安装第三方工具不得执行未经校验的浮动远程 shell 脚本。
+- mise 必须固定官方 release，并分别校验 amd64、arm64 asset 的 SHA-256；两个架构必须在同一提交中更新。
+- Codex CLI 是明确例外：必须继续动态解析 `openai/codex` 官方 latest，并通过官方 installer 安装，不得在仓库中静态固定版本。
+- provenance、SBOM 和漏洞扫描必须针对最终 registry candidate 根 digest，并在 promotion 前完成。
+- 未确认 OCI referrer 可达关系前，GHCR cleanup 必须继续保护所有 untagged versions。

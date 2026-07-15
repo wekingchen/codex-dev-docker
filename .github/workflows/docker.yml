@@ -28,11 +28,13 @@ concurrency:
 
 env:
   IMAGE_BASENAME: codex-dev-base
+  MISE_VERSION: "2026.7.7"
+  TRIVY_VERSION: "v0.72.0"
 
 jobs:
   resolve-codex-latest:
     name: 解析 Codex 官方 latest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       release_id: ${{ steps.release.outputs.release_id }}
       release_tag: ${{ steps.release.outputs.release_tag }}
@@ -90,11 +92,13 @@ jobs:
 
   static:
     name: 静态检查
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: 拉取仓库代码
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: 检查 Shell 脚本
         shell: bash
@@ -141,7 +145,7 @@ jobs:
 
   platform-smoke:
     name: 构建并验证 ${{ matrix.platform }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - resolve-codex-latest
       - static
@@ -156,16 +160,18 @@ jobs:
 
     steps:
       - name: 拉取仓库代码
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: 配置 QEMU 多架构支持
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: 配置 Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: 构建本地验证镜像
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: base/Dockerfile
@@ -173,6 +179,7 @@ jobs:
           load: true
           tags: codex-dev-smoke:${{ matrix.name }}
           build-args: |
+            MISE_VERSION=v${{ env.MISE_VERSION }}
             CODEX_RELEASE=${{ needs.resolve-codex-latest.outputs.version }}
             CODEX_RELEASE_ID=${{ needs.resolve-codex-latest.outputs.release_id }}
             CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
@@ -188,12 +195,13 @@ jobs:
           ./scripts/smoke-image.sh \
             codex-dev-smoke:${{ matrix.name }} \
             "${{ needs.resolve-codex-latest.outputs.version }}" \
-            "${{ matrix.platform }}"
+            "${{ matrix.platform }}" \
+            "${{ env.MISE_VERSION }}"
 
   publish-candidate:
     name: 发布双架构 candidate
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - resolve-codex-latest
       - static
@@ -208,16 +216,18 @@ jobs:
 
     steps:
       - name: 拉取仓库代码
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: 配置 QEMU 多架构支持
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: 配置 Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: 登录 GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -236,15 +246,17 @@ jobs:
 
       - name: 构建并推送 candidate
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: base/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.candidate_tag }}
-          provenance: false
+          provenance: mode=min
+          sbom: true
           build-args: |
+            MISE_VERSION=v${{ env.MISE_VERSION }}
             CODEX_RELEASE=${{ needs.resolve-codex-latest.outputs.version }}
             CODEX_RELEASE_ID=${{ needs.resolve-codex-latest.outputs.release_id }}
             CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
@@ -270,7 +282,7 @@ jobs:
   verify-candidate:
     name: 验证 registry candidate ${{ matrix.platform }}
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - resolve-codex-latest
       - publish-candidate
@@ -286,13 +298,15 @@ jobs:
 
     steps:
       - name: 拉取仓库代码
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: 配置 QEMU 多架构支持
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: 登录 GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -303,28 +317,176 @@ jobs:
           ./scripts/smoke-image.sh \
             "${{ needs.publish-candidate.outputs.image_name }}@${{ needs.publish-candidate.outputs.digest }}" \
             "${{ needs.resolve-codex-latest.outputs.version }}" \
-            "${{ matrix.platform }}"
+            "${{ matrix.platform }}" \
+            "${{ env.MISE_VERSION }}"
+
+  verify-attestations:
+    name: 验证 candidate provenance 与 SBOM
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    needs:
+      - publish-candidate
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: 配置 Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: 登录 GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 检查根 index 与 attestations
+        env:
+          IMAGE_REF: ${{ needs.publish-candidate.outputs.image_name }}@${{ needs.publish-candidate.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker buildx imagetools inspect --raw "$IMAGE_REF" > index.json
+          jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length == 1' index.json >/dev/null
+          jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length == 1' index.json >/dev/null
+          jq -e '[.manifests[] | select(.platform.os == "unknown" and .platform.architecture == "unknown")] | length >= 2' index.json >/dev/null
+
+          docker buildx imagetools inspect "$IMAGE_REF" --format '{{json .Provenance}}' > provenance.json
+          docker buildx imagetools inspect "$IMAGE_REF" --format '{{json .SBOM}}' > sbom.json
+          jq -e '. != null and . != {} and . != []' provenance.json >/dev/null
+          jq -e '. != null and . != {} and . != []' sbom.json >/dev/null
+
+          {
+            echo "### Candidate attestations"
+            echo "- Image: \`$IMAGE_REF\`"
+            echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
+            echo "- Provenance: available"
+            echo "- SBOM: available"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  scan-candidate:
+    name: Trivy 扫描 ${{ matrix.platform }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    needs:
+      - publish-candidate
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            name: amd64
+          - platform: linux/arm64
+            name: arm64
+
+    steps:
+      - name: 安装固定版本 Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: false
+
+      - name: 验证 Trivy 版本
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_version="$(trivy --version | awk '/^Version:/ {print $2; exit}')"
+          if [ "v${actual_version}" != "$TRIVY_VERSION" ]; then
+            echo "Trivy 版本不匹配：期望 $TRIVY_VERSION，实际 v${actual_version}" >&2
+            exit 1
+          fi
+
+      - name: 登录 GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成 Trivy 基线报告
+        env:
+          IMAGE_REF: ${{ needs.publish-candidate.outputs.image_name }}@${{ needs.publish-candidate.outputs.digest }}
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          PLATFORM: ${{ matrix.platform }}
+          REPORT_NAME: trivy-${{ matrix.name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          trivy image --image-src remote --platform "$PLATFORM" --scanners vuln \
+            --severity HIGH,CRITICAL --exit-code 0 --timeout 15m \
+            --format json --output "${REPORT_NAME}.json" "$IMAGE_REF"
+          trivy image --image-src remote --platform "$PLATFORM" --scanners vuln \
+            --severity HIGH,CRITICAL --exit-code 0 --timeout 15m \
+            --format table --output "${REPORT_NAME}.txt" "$IMAGE_REF"
+          trivy image --image-src remote --platform "$PLATFORM" --scanners vuln \
+            --severity HIGH,CRITICAL --exit-code 0 --timeout 15m \
+            --format sarif --output "${REPORT_NAME}.sarif" "$IMAGE_REF"
+
+          high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "${REPORT_NAME}.json")"
+          critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "${REPORT_NAME}.json")"
+          fixed_critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" and (.FixedVersion // "") != "")] | length' "${REPORT_NAME}.json")"
+          unfixed_critical=$((critical - fixed_critical))
+
+          {
+            echo "### Trivy $PLATFORM"
+            echo "- Image: \`$IMAGE_REF\`"
+            echo "- Trivy: \`$TRIVY_VERSION\`"
+            echo "- HIGH: $high"
+            echo "- CRITICAL: $critical"
+            echo "- CRITICAL with fix: $fixed_critical"
+            echo "- CRITICAL without fix: $unfixed_critical"
+            echo "- Gate: baseline only (non-blocking on vulnerability count)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传 Trivy 报告
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-${{ matrix.name }}-${{ github.run_id }}
+          path: |
+            trivy-${{ matrix.name }}.json
+            trivy-${{ matrix.name }}.txt
+            trivy-${{ matrix.name }}.sarif
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传 SARIF 到 Code Scanning
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          sarif_file: trivy-${{ matrix.name }}.sarif
+          category: trivy-container-${{ matrix.name }}
 
   promote:
     name: 提升 candidate 为正式标签
     if: >-
       github.event_name != 'pull_request' &&
       (github.event_name != 'workflow_dispatch' || inputs.promote)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - resolve-codex-latest
       - publish-candidate
       - verify-candidate
+      - verify-attestations
+      - scan-candidate
     permissions:
       contents: read
       packages: write
 
     steps:
       - name: 配置 Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: 登录 GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -382,7 +544,19 @@ jobs:
           done
 
           docker buildx imagetools create "${tag_args[@]}" "$source_ref"
-          docker buildx imagetools inspect "${tags[0]}"
+
+          for tag in "${tags[@]}"; do
+            actual_digest="$(docker buildx imagetools inspect "$tag" | awk '$1 == "Digest:" {print $2; exit}')"
+            if [ "$actual_digest" != "$DIGEST" ]; then
+              echo "正式标签 digest 不匹配：$tag 期望 $DIGEST，实际 $actual_digest" >&2
+              exit 1
+            fi
+          done
+
+          docker buildx imagetools inspect "${tags[0]}" --format '{{json .Provenance}}' > promoted-provenance.json
+          docker buildx imagetools inspect "${tags[0]}" --format '{{json .SBOM}}' > promoted-sbom.json
+          jq -e '. != null and . != {} and . != []' promoted-provenance.json >/dev/null
+          jq -e '. != null and . != {} and . != []' promoted-sbom.json >/dev/null
 
           {
             echo "### 已提升正式标签"

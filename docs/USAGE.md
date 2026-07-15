@@ -73,6 +73,34 @@ CI 发布过程：
 
 本地直接构建且不传 build args 时，Dockerfile 的 `CODEX_RELEASE` 默认为 `latest`，仍由官方 installer 解析当前 latest。
 
+## 3.1 供应链固定与构建证明
+
+当前策略：
+
+- 所有外部 Actions 使用完整 SHA和同行版本注释。
+- runner固定为 `ubuntu-24.04`；这只固定 OS label，不固定 GitHub runner VM镜像内容。
+- Dockerfile 的 Ubuntu使用 tag+多架构根 index digest。
+- mise固定官方 release，并分别校验 amd64、arm64 asset SHA-256。
+- Codex继续动态追踪 official latest，不与 mise采用相同的静态固定策略。
+
+Candidate push会生成 BuildKit `mode=min` provenance 和 SBOM。随后 CI按不可变根 digest验证：
+
+1. 根 index仍包含 amd64和arm64可运行manifest。
+2. provenance和SBOM可以从registry读取。
+3. 两个平台的registry smoke都通过。
+4. Trivy分别对同一根digest的amd64、arm64做remote扫描。
+5. promotion后的每个正式标签digest必须与candidate根digest一致，并仍可读取attestations。
+
+Trivy初始策略只建立基线：报告 HIGH/CRITICAL，但漏洞数量不阻断。扫描基础设施失败仍会阻断promotion。每个平台会上传JSON、table、SARIF artifact；SARIF还会尝试上传到Code Scanning。
+
+只读供应链审计：
+
+```bash
+./scripts/audit-supply-chain.sh
+```
+
+它会检查Actions tag/SHA对应关系、Ubuntu根digest和平台、mise最新稳定release及双架构checksum、Trivy固定版本。Codex不做静态版本比较，因为其official latest检查属于构建workflow。
+
 ## 4. Home volume 迁移
 
 旧 Compose 配置没有显式 volume `name`，实际名称可能带项目名前缀。先查询：
@@ -177,7 +205,7 @@ PR 只运行静态检查和双架构构建/smoke，不登录或推送 GHCR。
 candidate-<run-id>-<run-attempt>
 ```
 
-验证通过且官方 latest 未变化后，再提升为：
+candidate发布后，CI会并行执行双架构registry smoke、provenance/SBOM验证和双平台Trivy基线扫描。全部基础设施步骤通过且官方 latest 未变化后，再提升为：
 
 ```text
 latest
@@ -200,7 +228,7 @@ v0.1.0
 
 - 根据 owner 类型选择 User 或 Organization API。
 - 分页读取超过 100 个版本。
-- 保护 latest、semver、未知标签和 untagged/referrer。
+- 保护 latest、semver、未知标签和全部 untagged versions；当前不解析referrer可达关系。
 - 只清理旧 candidate、日期和 commit 临时标签。
 - 保留最近 10 个临时版本。
 - 限制单次删除数量，硬上限为 10。
@@ -220,6 +248,7 @@ v0.1.0
 bash -n scripts/*.sh
 shellcheck scripts/*.sh
 ./scripts/check-hardcoded.sh
+./scripts/audit-supply-chain.sh
 git diff --check
 ```
 
@@ -233,8 +262,17 @@ docker compose config --volumes
 本地镜像 smoke：
 
 ```bash
-./scripts/smoke-image.sh <镜像引用> <期望-Codex-版本> linux/amd64
+./scripts/smoke-image.sh <镜像引用> <期望-Codex-版本> linux/amd64 <期望-mise-版本>
 ```
+
+Candidate构建证明：
+
+```bash
+docker buildx imagetools inspect <镜像@digest> --format '{{json .Provenance}}'
+docker buildx imagetools inspect <镜像@digest> --format '{{json .SBOM}}'
+```
+
+启用attestations后，应再次手动运行cleanup `dry_run=true`，确认新出现的untagged versions仍被保护。
 
 原生 Linux UID/GID 验证：
 

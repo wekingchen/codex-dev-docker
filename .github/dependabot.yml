@@ -1,11 +1,19 @@
 version: 2
 updates:
+  # 更新固定到完整 SHA 的 GitHub Actions；PR 必须保留同行版本注释。
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "05:17"
+      timezone: "Etc/UTC"
 
+  # 负责 Ubuntu tag 升级；同 tag 根 digest 漂移由 supply-chain audit 检测。
   - package-ecosystem: "docker"
     directory: "/base"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "05:23"
+      timezone: "Etc/UTC"

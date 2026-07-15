@@ -39,6 +39,26 @@ GitHub Actions 在每次构建时从 `openai/codex` 官方 `releases/latest` API
 
 因此，每次新发布的 GHCR `latest` 都与该次发布流程确认的 OpenAI 官方 latest 一致。每日定时任务负责追踪上游更新；它不承诺 OpenAI 发版与本项目镜像在同一瞬间完成更新。
 
+## 供应链增强
+
+除 Codex official latest 这一明确的动态例外外，构建输入采用以下固定策略：
+
+- GitHub-hosted runner 固定为 `ubuntu-24.04`，不使用 `ubuntu-latest`。runner 内的软件仍会由 GitHub 滚动更新。
+- 所有外部 GitHub Actions 固定到官方仓库的完整 40 位 commit SHA，并保留同行版本注释；checkout 不保留 Git 凭据。
+- `ubuntu:26.04` 同时保留可读 tag 和经过验证的多架构根 OCI index digest。
+- mise 固定官方 release，并分别校验 amd64、arm64 raw binary 的 SHA-256；不再执行 `curl https://mise.run | sh`。
+- registry candidate 会生成 BuildKit `mode=min` provenance 和 SBOM；promotion 前必须确认两者可读。
+- Trivy 分别扫描 candidate 根 digest 中的 amd64、arm64 manifest，生成 JSON、table 和 SARIF。当前是非阻断基线：发现 HIGH/CRITICAL 不阻断，但扫描器、认证、manifest或报告生成失败会阻断 promotion。
+- `.github/workflows/supply-chain-audit.yml` 每周只读检查 Actions SHA、Ubuntu digest、mise asset和 Trivy 版本漂移，不自动修改仓库或 registry。
+
+手动运行审计：
+
+```bash
+./scripts/audit-supply-chain.sh
+```
+
+Dependabot继续更新 GitHub Actions 和 Docker tag；同 tag Ubuntu digest、mise 和 Trivy binary的漂移由审计 workflow提醒后人工更新，并重新通过完整双架构 candidate流程。
+
 ## 配置
 
 本地配置不受 Git 跟踪。首次使用可以复制示例：
@@ -190,7 +210,7 @@ git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 ```
 
-还会发布 `v0.1.0` 和 `0.1.0`。版本 tag 可能补打在较旧 commit 上，因此 tag 构建不会移动 `latest`。手动运行 workflow 时，`promote` 默认关闭，只构建和验证 candidate；明确启用后才移动正式标签。
+还会发布 `v0.1.0` 和 `0.1.0`。版本 tag 可能补打在较旧 commit 上，因此 tag 构建不会移动 `latest`。手动运行 workflow 时，`promote` 默认关闭，只构建 candidate、验证两个架构、验证 provenance/SBOM并生成 Trivy报告；明确启用后才移动正式标签。所有正式标签必须与已验证 candidate根 digest完全一致。
 
 ## GHCR 清理
 
@@ -199,15 +219,15 @@ git push origin v0.1.0
 - `latest`
 - semver 标签
 - 未知标签
-- untagged 版本
-- 无法确认用途的 OCI referrer
+- 所有 untagged 版本（包括可能的 attestation、SBOM和平台子 manifest）
 
-定时任务当前只做 dry-run。手动真实删除时需要关闭 `dry_run`、填写确认值 `codex-dev-base`，并受单次硬删除上限保护。
+当前 cleanup 并不解析 OCI referrer可达关系，而是保守地保护全部 untagged versions，因此启用 attestations 后 registry存储会逐步增长。定时任务当前只做 dry-run。手动真实删除时需要关闭 `dry_run`、填写确认值 `codex-dev-base`，并受单次硬删除上限保护。
 
 ## 自检
 
 ```bash
 ./scripts/check-hardcoded.sh
+./scripts/audit-supply-chain.sh
 bash -n scripts/*.sh
 shellcheck scripts/*.sh
 ```

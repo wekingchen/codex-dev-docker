@@ -1,0 +1,26 @@
+name: 审计供应链固定项
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每周一 UTC 04:13 检查 Actions、Ubuntu、mise 和 Trivy 漂移。
+    - cron: "13 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: 检查供应链版本与 digest
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 运行只读供应链审计
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/audit-supply-chain.sh

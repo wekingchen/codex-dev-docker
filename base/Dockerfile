@@ -1,9 +1,13 @@
 # syntax=docker/dockerfile:1.7
-FROM ubuntu:26.04
+FROM ubuntu:26.04@sha256:b7f48194d4d8b763a478a621cdc81c27be222ba2206ca3ca6bc42b49685f3d9e
 
+ARG TARGETARCH
 ARG USERNAME=dev
 ARG USER_UID=1000
 ARG USER_GID=$USER_UID
+ARG MISE_VERSION=v2026.7.7
+ARG MISE_SHA256_AMD64=429f71e7e989908bf975aafac9066329c16e2d8fc7cd8e74fdf21dd6300ffe7c
+ARG MISE_SHA256_ARM64=1b4ef061d25f0ceb508f11169482f3074e55c1698a1494f666386b2fcfb46b9b
 ARG CODEX_RELEASE=latest
 ARG CODEX_RELEASE_ID=latest
 ARG CODEX_RELEASE_TAG=latest
@@ -111,16 +115,25 @@ RUN set -eux; \
     mkdir -p /workspace "/home/${USERNAME}"; \
     chown -R "${USERNAME}:${USERNAME}" /workspace "/home/${USERNAME}"
 
-USER ${USERNAME}
+USER root
 WORKDIR /home/${USERNAME}
 
-# mise：按项目管理 Node、Python、Go、Rust、Java 等语言运行时。
-# 基础镜像不内置这些运行时，避免变成臃肿的全家桶镜像。
-RUN curl -fsSL https://mise.run | sh \
-    && /home/${USERNAME}/.local/bin/mise --version
-
-USER root
-RUN install -m 0755 "/home/${USERNAME}/.local/bin/mise" /usr/local/bin/mise
+# mise：固定官方 release 和两个目标架构的 SHA-256，不执行浮动远程安装脚本。
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) MISE_ARCH="x64"; MISE_SHA256="${MISE_SHA256_AMD64}" ;; \
+        arm64) MISE_ARCH="arm64"; MISE_SHA256="${MISE_SHA256_ARM64}" ;; \
+        *) echo "Unsupported TARGETARCH for mise: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    MISE_ASSET="mise-${MISE_VERSION}-linux-${MISE_ARCH}"; \
+    curl --fail --location --silent --show-error --retry 3 \
+        "https://github.com/jdx/mise/releases/download/${MISE_VERSION}/${MISE_ASSET}" \
+        --output "/tmp/${MISE_ASSET}"; \
+    printf '%s  %s\n' "${MISE_SHA256}" "/tmp/${MISE_ASSET}" | sha256sum --check --strict; \
+    install -m 0755 "/tmp/${MISE_ASSET}" /usr/local/bin/mise; \
+    rm -f "/tmp/${MISE_ASSET}"; \
+    ACTUAL_MISE_VERSION="$(mise --version | awk '{print $1}')"; \
+    test "${ACTUAL_MISE_VERSION}" = "${MISE_VERSION#v}"
 
 USER ${USERNAME}
 
@@ -138,7 +151,9 @@ USER root
 RUN install -m 0755 "$(cat /tmp/codex-path)" /usr/local/bin/codex \
     && rm -f /tmp/codex-path
 
-LABEL io.codex-dev.codex.source="https://github.com/openai/codex" \
+LABEL io.codex-dev.mise.source="https://github.com/jdx/mise" \
+      io.codex-dev.mise.version="${MISE_VERSION}" \
+      io.codex-dev.codex.source="https://github.com/openai/codex" \
       io.codex-dev.codex.release-id="${CODEX_RELEASE_ID}" \
       io.codex-dev.codex.release-tag="${CODEX_RELEASE_TAG}" \
       io.codex-dev.codex.version="${CODEX_RELEASE}"

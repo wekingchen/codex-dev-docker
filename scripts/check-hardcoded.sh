@@ -12,6 +12,8 @@ FILES_TO_CHECK=(
   ".env.example"
   ".github/workflows/docker.yml"
   ".github/workflows/cleanup-ghcr.yml"
+  ".github/workflows/supply-chain-audit.yml"
+  "scripts/audit-supply-chain.sh"
   "scripts/run.sh"
   "scripts/run-with-ssh-agent.sh"
   "scripts/pull-latest.sh"

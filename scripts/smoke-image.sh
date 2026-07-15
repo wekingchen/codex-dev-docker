@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
-  echo "用法：$0 <镜像引用> [期望 Codex 版本|latest] [平台]" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 4 ]; then
+  echo "用法：$0 <镜像引用> [期望 Codex 版本|latest] [平台] [期望 mise 版本]" >&2
   exit 1
 fi
 
 IMAGE="$1"
 EXPECTED_VERSION="${2:-latest}"
 PLATFORM="${3:-linux/amd64}"
+EXPECTED_MISE_VERSION="${4:-}"
 HOME_VOLUME="codex-smoke-home-$$-${RANDOM:-0}"
 
 cleanup() {
@@ -37,9 +38,11 @@ output="$(docker run --rm --platform "$PLATFORM" \
     command -v codex >/dev/null
     command -v mise >/dev/null
     codex_output="$(codex --version)"
+    mise_output="$(mise --version)"
     printf "CODEX_OUTPUT=%s\n" "$codex_output"
     printf "CODEX_VERSION=%s\n" "${codex_output##* }"
-    printf "MISE_OUTPUT=%s\n" "$(mise --version)"
+    printf "MISE_OUTPUT=%s\n" "$mise_output"
+    printf "MISE_VERSION=%s\n" "${mise_output%% *}"
     printf "USER_ID=%s:%s\n" "$(id -u)" "$(id -g)"
     printf "ARCH=%s\n" "$(uname -m)"
   ')"
@@ -47,10 +50,12 @@ output="$(docker run --rm --platform "$PLATFORM" \
 printf '%s\n' "$output"
 
 actual_version=""
+actual_mise_version=""
 actual_arch=""
 while IFS= read -r line; do
   case "$line" in
     CODEX_VERSION=*) actual_version="${line#*=}" ;;
+    MISE_VERSION=*) actual_mise_version="${line#*=}" ;;
     ARCH=*) actual_arch="${line#*=}" ;;
   esac
 done <<< "$output"
@@ -62,6 +67,16 @@ fi
 
 if [ "$EXPECTED_VERSION" != "latest" ] && [ "$actual_version" != "$EXPECTED_VERSION" ]; then
   echo "Codex 版本不匹配：期望 $EXPECTED_VERSION，实际 $actual_version" >&2
+  exit 1
+fi
+
+if [ -z "$actual_mise_version" ]; then
+  echo "无法从 smoke 输出解析 mise 版本。" >&2
+  exit 1
+fi
+
+if [ -n "$EXPECTED_MISE_VERSION" ] && [ "$actual_mise_version" != "$EXPECTED_MISE_VERSION" ]; then
+  echo "mise 版本不匹配：期望 $EXPECTED_MISE_VERSION，实际 $actual_mise_version" >&2
   exit 1
 fi
 
@@ -88,4 +103,4 @@ remap_output="$(docker run --rm --platform "$PLATFORM" \
   ')"
 printf '%s\n' "$remap_output"
 
-echo "镜像 smoke test 通过：$IMAGE ($PLATFORM, Codex $actual_version)"
+echo "镜像 smoke test 通过：$IMAGE ($PLATFORM, Codex $actual_version, mise $actual_mise_version)"
