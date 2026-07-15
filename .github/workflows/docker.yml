@@ -545,16 +545,57 @@ jobs:
 
           docker buildx imagetools create "${tag_args[@]}" "$source_ref"
 
+          inspect_digest_with_retry() {
+            local tag="$1"
+            local inspect_output=""
+            local actual_digest=""
+            local attempt
+
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if inspect_output="$(docker buildx imagetools inspect "$tag" 2>&1)"; then
+                actual_digest="$(awk '$1 == "Digest:" {print $2; exit}' <<< "$inspect_output")"
+                if [ "$actual_digest" = "$DIGEST" ]; then
+                  return 0
+                fi
+              fi
+
+              if [ "$attempt" -lt 10 ]; then
+                echo "等待 registry 同步正式标签：$tag（第 $attempt 次检查）" >&2
+                sleep 3
+              fi
+            done
+
+            printf '%s\n' "$inspect_output" >&2
+            echo "正式标签 digest 不匹配：$tag 期望 $DIGEST，实际 ${actual_digest:-<无法读取>}" >&2
+            return 1
+          }
+
+          inspect_json_with_retry() {
+            local tag="$1"
+            local format="$2"
+            local output_file="$3"
+            local attempt
+
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if docker buildx imagetools inspect "$tag" --format "$format" > "$output_file"; then
+                return 0
+              fi
+
+              if [ "$attempt" -lt 10 ]; then
+                echo "等待 registry 同步构建证明：$tag（第 $attempt 次检查）" >&2
+                sleep 3
+              fi
+            done
+
+            return 1
+          }
+
           for tag in "${tags[@]}"; do
-            actual_digest="$(docker buildx imagetools inspect "$tag" | awk '$1 == "Digest:" {print $2; exit}')"
-            if [ "$actual_digest" != "$DIGEST" ]; then
-              echo "正式标签 digest 不匹配：$tag 期望 $DIGEST，实际 $actual_digest" >&2
-              exit 1
-            fi
+            inspect_digest_with_retry "$tag"
           done
 
-          docker buildx imagetools inspect "${tags[0]}" --format '{{json .Provenance}}' > promoted-provenance.json
-          docker buildx imagetools inspect "${tags[0]}" --format '{{json .SBOM}}' > promoted-sbom.json
+          inspect_json_with_retry "${tags[0]}" '{{json .Provenance}}' promoted-provenance.json
+          inspect_json_with_retry "${tags[0]}" '{{json .SBOM}}' promoted-sbom.json
           jq -e '. != null and . != {} and . != []' promoted-provenance.json >/dev/null
           jq -e '. != null and . != {} and . != []' promoted-sbom.json >/dev/null
 
