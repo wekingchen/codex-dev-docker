@@ -29,6 +29,7 @@ FILES_TO_CHECK=(
   "scripts/smoke-remote-ssh.sh"
   "scripts/validate-authorized-keys.sh"
   "remote/sshd_config"
+  "templates/portainer-stack.yaml"
   "base/Dockerfile"
 )
 

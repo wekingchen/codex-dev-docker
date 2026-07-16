@@ -120,6 +120,12 @@ docker compose run --rm codex
 - authorized keys从本地 `.codex-ssh/authorized_keys` 只读输入，并复制为容器内 root-owned运行时文件。
 - 不挂载 Docker socket、宿主机私钥或宿主根目录。
 
+部署方式：
+
+- 仓库 Compose/ProxyJump 通用说明：[`docs/USAGE.md`](docs/USAGE.md)
+- Portainer + PuTTYgen + WinSCP 最终教程：[`docs/PORTAINER.md`](docs/PORTAINER.md)
+- 可直接粘贴到 Portainer 的 Stack 模板：[`templates/portainer-stack.yaml`](templates/portainer-stack.yaml)
+
 生成专用客户端密钥并启动：
 
 ```bash
