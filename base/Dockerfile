@@ -25,11 +25,29 @@ ENV PATH=/home/${USERNAME}/.local/share/mise/shims:/usr/local/bin:/home/${USERNA
 
 # 共享 runtime 只提供 Codex 通用工具，不预装完整技术栈。
 # 项目需要的语言运行时和依赖，后续由 Codex 根据项目内容在容器内安装。
-RUN apt-get -o Acquire::Retries=5 update \
-    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+# Ubuntu最小根文件系统尚无CA bundle。先通过仍受APT签名保护的HTTPS仓库安装CA，
+# 随后立即恢复证书校验并用HTTPS完成全部软件包安装。
+RUN sed -i \
+        -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+        -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
+        -e 's|http://ports.ubuntu.com/ubuntu-ports|https://ports.ubuntu.com/ubuntu-ports|g' \
+        /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get \
+        -o Acquire::Retries=5 \
+        -o Acquire::https::Timeout=30 \
+        -o Acquire::https::Verify-Peer=false \
+        -o Acquire::https::Verify-Host=false \
+        update \
+    && apt-get \
+        -o Acquire::Retries=5 \
+        -o Acquire::https::Timeout=30 \
+        -o Acquire::https::Verify-Peer=false \
+        -o Acquire::https::Verify-Host=false \
+        install -y --no-install-recommends ca-certificates \
+    && apt-get -o Acquire::Retries=5 -o Acquire::https::Timeout=30 update \
+    && apt-get -o Acquire::Retries=5 -o Acquire::https::Timeout=30 install -y --no-install-recommends \
     bash \
     bash-completion \
-    ca-certificates \
     curl \
     wget \
     git \
