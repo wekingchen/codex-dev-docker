@@ -1,4 +1,4 @@
-name: 构建 Codex 通用运行镜像
+name: 构建 Codex base 与 remote 镜像
 
 on:
   pull_request:
@@ -28,6 +28,7 @@ concurrency:
 
 env:
   IMAGE_BASENAME: codex-dev-base
+  REMOTE_IMAGE_BASENAME: codex-dev-remote
   MISE_VERSION: "2026.7.7"
   TRIVY_VERSION: "v0.72.0"
 
@@ -132,6 +133,15 @@ jobs:
             --project-directory "$GITHUB_WORKSPACE" \
             -f "$GITHUB_WORKSPACE/compose.yaml" \
             config >/dev/null
+          docker compose \
+            --project-directory "$GITHUB_WORKSPACE" \
+            -f "$GITHUB_WORKSPACE/compose.yaml" \
+            -f "$GITHUB_WORKSPACE/compose.remote.yaml" \
+            --profile remote \
+            config >/dev/null
+
+      - name: 检查秘密材料
+        run: ./scripts/check-secrets.sh
 
       - name: 从仓库外执行硬编码检查
         shell: bash
@@ -170,14 +180,15 @@ jobs:
       - name: 配置 Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - name: 构建本地验证镜像
+      - name: 构建本地 base 验证镜像
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: base/Dockerfile
+          target: base
           platforms: ${{ matrix.platform }}
           load: true
-          tags: codex-dev-smoke:${{ matrix.name }}
+          tags: codex-dev-smoke-base:${{ matrix.name }}
           build-args: |
             MISE_VERSION=v${{ env.MISE_VERSION }}
             CODEX_RELEASE=${{ needs.resolve-codex-latest.outputs.version }}
@@ -190,13 +201,45 @@ jobs:
           cache-from: type=gha,scope=codex-${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=codex-${{ matrix.name }}
 
-      - name: 运行镜像 smoke test
+      - name: 运行 base 镜像 smoke test
         run: |
           ./scripts/smoke-image.sh \
-            codex-dev-smoke:${{ matrix.name }} \
+            codex-dev-smoke-base:${{ matrix.name }} \
             "${{ needs.resolve-codex-latest.outputs.version }}" \
             "${{ matrix.platform }}" \
             "${{ env.MISE_VERSION }}"
+
+      - name: 构建本地 remote 验证镜像
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: base/Dockerfile
+          target: remote
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: codex-dev-smoke-remote:${{ matrix.name }}
+          build-args: |
+            MISE_VERSION=v${{ env.MISE_VERSION }}
+            CODEX_RELEASE=${{ needs.resolve-codex-latest.outputs.version }}
+            CODEX_RELEASE_ID=${{ needs.resolve-codex-latest.outputs.release_id }}
+            CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=codex-dev-remote
+            org.opencontainers.image.description=通过宿主机SSH ProxyJump访问的key-only Codex远程运行镜像。
+          cache-from: |
+            type=gha,scope=codex-${{ matrix.name }}
+            type=gha,scope=codex-remote-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=codex-remote-${{ matrix.name }}
+
+      - name: 运行 remote SSH smoke test
+        run: |
+          ./scripts/smoke-remote-ssh.sh \
+            codex-dev-smoke-remote:${{ matrix.name }} \
+            "${{ needs.resolve-codex-latest.outputs.version }}" \
+            "${{ matrix.platform }}" \
+            "${{ env.MISE_VERSION }}" \
+            codex-dev-smoke-base:${{ matrix.name }}
 
   publish-candidate:
     name: 发布双架构 candidate
@@ -250,6 +293,7 @@ jobs:
         with:
           context: .
           file: base/Dockerfile
+          target: base
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.candidate_tag }}
@@ -275,6 +319,88 @@ jobs:
         run: |
           {
             echo "### Candidate"
+            echo "- Image: \`${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.candidate_tag }}\`"
+            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-remote-candidate:
+    name: 发布 remote 双架构 candidate
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    needs:
+      - resolve-codex-latest
+      - static
+      - platform-smoke
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_name: ${{ steps.meta.outputs.image_name }}
+      candidate_tag: ${{ steps.meta.outputs.candidate_tag }}
+      digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 配置 QEMU 多架构支持
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: 配置 Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: 登录 GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成 remote candidate 信息
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner_lc="$(tr '[:upper:]' '[:lower:]' <<< "$GITHUB_REPOSITORY_OWNER")"
+          image_name="ghcr.io/${owner_lc}/${REMOTE_IMAGE_BASENAME}"
+          candidate_tag="candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "image_name=$image_name" >> "$GITHUB_OUTPUT"
+          echo "candidate_tag=$candidate_tag" >> "$GITHUB_OUTPUT"
+
+      - name: 构建并推送 remote candidate
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: base/Dockerfile
+          target: remote
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.candidate_tag }}
+          provenance: mode=min
+          sbom: true
+          build-args: |
+            MISE_VERSION=v${{ env.MISE_VERSION }}
+            CODEX_RELEASE=${{ needs.resolve-codex-latest.outputs.version }}
+            CODEX_RELEASE_ID=${{ needs.resolve-codex-latest.outputs.release_id }}
+            CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=codex-dev-remote
+            org.opencontainers.image.description=通过宿主机SSH ProxyJump访问的key-only Codex远程运行镜像。
+          cache-from: |
+            type=gha,scope=codex-remote-amd64
+            type=gha,scope=codex-remote-arm64
+            type=gha,scope=codex-remote-publish
+          cache-to: type=gha,mode=max,scope=codex-remote-publish
+
+      - name: 记录 remote candidate digest
+        shell: bash
+        run: |
+          {
+            echo "### Remote candidate"
             echo "- Image: \`${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.candidate_tag }}\`"
             echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -320,6 +446,49 @@ jobs:
             "${{ matrix.platform }}" \
             "${{ env.MISE_VERSION }}"
 
+  verify-remote-candidate:
+    name: 验证 remote registry candidate ${{ matrix.platform }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    needs:
+      - resolve-codex-latest
+      - publish-candidate
+      - publish-remote-candidate
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+          - platform: linux/arm64
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 配置 QEMU 多架构支持
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: 登录 GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 按 digest 运行 remote SSH smoke test
+        run: |
+          ./scripts/smoke-remote-ssh.sh \
+            "${{ needs.publish-remote-candidate.outputs.image_name }}@${{ needs.publish-remote-candidate.outputs.digest }}" \
+            "${{ needs.resolve-codex-latest.outputs.version }}" \
+            "${{ matrix.platform }}" \
+            "${{ env.MISE_VERSION }}" \
+            "${{ needs.publish-candidate.outputs.image_name }}@${{ needs.publish-candidate.outputs.digest }}"
+
   verify-attestations:
     name: 验证 candidate provenance 与 SBOM
     if: github.event_name != 'pull_request'
@@ -360,6 +529,52 @@ jobs:
 
           {
             echo "### Candidate attestations"
+            echo "- Image: \`$IMAGE_REF\`"
+            echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
+            echo "- Provenance: available"
+            echo "- SBOM: available"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-remote-attestations:
+    name: 验证 remote candidate provenance 与 SBOM
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    needs:
+      - publish-remote-candidate
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: 配置 Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: 登录 GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 检查 remote 根 index 与 attestations
+        env:
+          IMAGE_REF: ${{ needs.publish-remote-candidate.outputs.image_name }}@${{ needs.publish-remote-candidate.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker buildx imagetools inspect --raw "$IMAGE_REF" > remote-index.json
+          jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length == 1' remote-index.json >/dev/null
+          jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length == 1' remote-index.json >/dev/null
+          jq -e '[.manifests[] | select(.platform.os == "unknown" and .platform.architecture == "unknown")] | length >= 2' remote-index.json >/dev/null
+
+          docker buildx imagetools inspect "$IMAGE_REF" --format '{{json .Provenance}}' > remote-provenance.json
+          docker buildx imagetools inspect "$IMAGE_REF" --format '{{json .SBOM}}' > remote-sbom.json
+          jq -e '. != null and . != {} and . != []' remote-provenance.json >/dev/null
+          jq -e '. != null and . != {} and . != []' remote-sbom.json >/dev/null
+
+          {
+            echo "### Remote candidate attestations"
             echo "- Image: \`$IMAGE_REF\`"
             echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
             echo "- Provenance: available"
@@ -465,6 +680,111 @@ jobs:
           sarif_file: trivy-${{ matrix.name }}.sarif
           category: trivy-container-${{ matrix.name }}
 
+  scan-remote-candidate:
+    name: Trivy 扫描 remote ${{ matrix.platform }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    needs:
+      - publish-remote-candidate
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            name: amd64
+          - platform: linux/arm64
+            name: arm64
+
+    steps:
+      - name: 安装固定版本 Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: false
+
+      - name: 验证 Trivy 版本
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_version="$(trivy --version | awk '/^Version:/ {print $2; exit}')"
+          if [ "v${actual_version}" != "$TRIVY_VERSION" ]; then
+            echo "Trivy 版本不匹配：期望 $TRIVY_VERSION，实际 v${actual_version}" >&2
+            exit 1
+          fi
+
+      - name: 登录 GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成 remote Trivy 报告并执行门禁
+        env:
+          IMAGE_REF: ${{ needs.publish-remote-candidate.outputs.image_name }}@${{ needs.publish-remote-candidate.outputs.digest }}
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          PLATFORM: ${{ matrix.platform }}
+          REPORT_NAME: trivy-remote-${{ matrix.name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          trivy image --image-src remote --platform "$PLATFORM" --scanners vuln \
+            --severity HIGH,CRITICAL --exit-code 0 --timeout 15m \
+            --format json --output "${REPORT_NAME}.json" "$IMAGE_REF"
+          trivy image --image-src remote --platform "$PLATFORM" --scanners vuln \
+            --severity HIGH,CRITICAL --exit-code 0 --timeout 15m \
+            --format table --output "${REPORT_NAME}.txt" "$IMAGE_REF"
+          trivy image --image-src remote --platform "$PLATFORM" --scanners vuln \
+            --severity HIGH,CRITICAL --exit-code 0 --timeout 15m \
+            --format sarif --output "${REPORT_NAME}.sarif" "$IMAGE_REF"
+
+          high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "${REPORT_NAME}.json")"
+          critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "${REPORT_NAME}.json")"
+          fixed_critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" and (.FixedVersion // "") != "")] | length' "${REPORT_NAME}.json")"
+          unfixed_critical=$((critical - fixed_critical))
+
+          {
+            echo "### Trivy remote $PLATFORM"
+            echo "- Image: \`$IMAGE_REF\`"
+            echo "- Trivy: \`$TRIVY_VERSION\`"
+            echo "- HIGH: $high"
+            echo "- CRITICAL: $critical"
+            echo "- CRITICAL with fix: $fixed_critical"
+            echo "- CRITICAL without fix: $unfixed_critical"
+            echo "- Gate: block when a CRITICAL vulnerability has a fix"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$fixed_critical" -gt 0 ]; then
+            echo "remote镜像存在$fixed_critical个已有修复版本的CRITICAL漏洞，阻止promotion。" >&2
+            exit 1
+          fi
+
+      - name: 上传 remote Trivy 报告
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-remote-${{ matrix.name }}-${{ github.run_id }}
+          path: |
+            trivy-remote-${{ matrix.name }}.json
+            trivy-remote-${{ matrix.name }}.txt
+            trivy-remote-${{ matrix.name }}.sarif
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传 remote SARIF 到 Code Scanning
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          sarif_file: trivy-remote-${{ matrix.name }}.sarif
+          category: trivy-container-remote-${{ matrix.name }}
+
   promote:
     name: 提升 candidate 为正式标签
     if: >-
@@ -474,9 +794,13 @@ jobs:
     needs:
       - resolve-codex-latest
       - publish-candidate
+      - publish-remote-candidate
       - verify-candidate
+      - verify-remote-candidate
       - verify-attestations
+      - verify-remote-attestations
       - scan-candidate
+      - scan-remote-candidate
     permissions:
       contents: read
       packages: write
@@ -512,41 +836,22 @@ jobs:
             exit 1
           fi
 
-      - name: 按已验证 digest 创建正式标签
+      - name: 按已验证 digest 创建两个 package 的正式标签
         env:
-          IMAGE_NAME: ${{ needs.publish-candidate.outputs.image_name }}
-          DIGEST: ${{ needs.publish-candidate.outputs.digest }}
+          BASE_IMAGE_NAME: ${{ needs.publish-candidate.outputs.image_name }}
+          BASE_DIGEST: ${{ needs.publish-candidate.outputs.digest }}
+          REMOTE_IMAGE_NAME: ${{ needs.publish-remote-candidate.outputs.image_name }}
+          REMOTE_DIGEST: ${{ needs.publish-remote-candidate.outputs.digest }}
         shell: bash
         run: |
           set -euo pipefail
 
           date_tag="$(date -u +'%Y%m%d')"
           short_sha="${GITHUB_SHA::7}"
-          source_ref="${IMAGE_NAME}@${DIGEST}"
-          tags=("${IMAGE_NAME}:${short_sha}")
-
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            # 版本 tag 可能补打在较旧 commit 上，因此不能让它回退 latest。
-            tags+=("${IMAGE_NAME}:${GITHUB_REF_NAME}")
-            if [[ "$GITHUB_REF_NAME" == v* ]]; then
-              tags+=("${IMAGE_NAME}:${GITHUB_REF_NAME#v}")
-            fi
-          else
-            tags+=(
-              "${IMAGE_NAME}:latest"
-              "${IMAGE_NAME}:${date_tag}"
-            )
-          fi
-
-          tag_args=()
-          for tag in "${tags[@]}"; do
-            tag_args+=(--tag "$tag")
-          done
-
-          docker buildx imagetools create "${tag_args[@]}" "$source_ref"
 
           inspect_digest_with_retry() {
             local tag="$1"
+            local expected_digest="$2"
             local inspect_output=""
             local actual_digest=""
             local attempt
@@ -554,7 +859,7 @@ jobs:
             for attempt in 1 2 3 4 5 6 7 8 9 10; do
               if inspect_output="$(docker buildx imagetools inspect "$tag" 2>&1)"; then
                 actual_digest="$(awk '$1 == "Digest:" {print $2; exit}' <<< "$inspect_output")"
-                if [ "$actual_digest" = "$DIGEST" ]; then
+                if [ "$actual_digest" = "$expected_digest" ]; then
                   return 0
                 fi
               fi
@@ -566,7 +871,7 @@ jobs:
             done
 
             printf '%s\n' "$inspect_output" >&2
-            echo "正式标签 digest 不匹配：$tag 期望 $DIGEST，实际 ${actual_digest:-<无法读取>}" >&2
+            echo "正式标签 digest 不匹配：$tag 期望 $expected_digest，实际 ${actual_digest:-<无法读取>}" >&2
             return 1
           }
 
@@ -590,19 +895,53 @@ jobs:
             return 1
           }
 
-          for tag in "${tags[@]}"; do
-            inspect_digest_with_retry "$tag"
-          done
+          promote_image() {
+            local role="$1"
+            local image_name="$2"
+            local digest="$3"
+            local source_ref="${image_name}@${digest}"
+            local -a tags=("${image_name}:${short_sha}")
+            local -a tag_args=()
+            local tag
 
-          inspect_json_with_retry "${tags[0]}" '{{json .Provenance}}' promoted-provenance.json
-          inspect_json_with_retry "${tags[0]}" '{{json .SBOM}}' promoted-sbom.json
-          jq -e '. != null and . != {} and . != []' promoted-provenance.json >/dev/null
-          jq -e '. != null and . != {} and . != []' promoted-sbom.json >/dev/null
+            if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+              # 版本 tag 可能补打在较旧 commit 上，因此不能让它回退 latest。
+              tags+=("${image_name}:${GITHUB_REF_NAME}")
+              if [[ "$GITHUB_REF_NAME" == v* ]]; then
+                tags+=("${image_name}:${GITHUB_REF_NAME#v}")
+              fi
+            else
+              tags+=(
+                "${image_name}:latest"
+                "${image_name}:${date_tag}"
+              )
+            fi
 
-          {
-            echo "### 已提升正式标签"
-            echo "- Source: \`$source_ref\`"
             for tag in "${tags[@]}"; do
-              echo "- \`$tag\`"
+              tag_args+=(--tag "$tag")
             done
-          } >> "$GITHUB_STEP_SUMMARY"
+
+            docker buildx imagetools create "${tag_args[@]}" "$source_ref"
+
+            for tag in "${tags[@]}"; do
+              inspect_digest_with_retry "$tag" "$digest"
+            done
+
+            inspect_json_with_retry "${tags[0]}" '{{json .Provenance}}' "${role}-promoted-provenance.json"
+            inspect_json_with_retry "${tags[0]}" '{{json .SBOM}}' "${role}-promoted-sbom.json"
+            jq -e '. != null and . != {} and . != []' "${role}-promoted-provenance.json" >/dev/null
+            jq -e '. != null and . != {} and . != []' "${role}-promoted-sbom.json" >/dev/null
+
+            {
+              echo "### 已提升 ${role} 正式标签"
+              echo "- Source: \`$source_ref\`"
+              for tag in "${tags[@]}"; do
+                echo "- \`$tag\`"
+              done
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          # 所有base/remote门禁均已通过后才开始移动标签。GHCR不支持跨package事务，
+          # 因此逐个提升并逐标签复核；中途失败会明确暴露部分完成状态，需重跑恢复。
+          promote_image base "$BASE_IMAGE_NAME" "$BASE_DIGEST"
+          promote_image remote "$REMOTE_IMAGE_NAME" "$REMOTE_DIGEST"

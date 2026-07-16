@@ -3,7 +3,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-COMPOSE_ARGS=(--project-directory "$REPO_ROOT" -f "$REPO_ROOT/compose.yaml")
+COMPOSE_ARGS=(
+  --project-directory "$REPO_ROOT"
+  -f "$REPO_ROOT/compose.yaml"
+  -f "$REPO_ROOT/compose.remote.yaml"
+  --profile remote
+)
 
 if [ -f "$REPO_ROOT/.env" ]; then
   COMPOSE_ARGS+=(--env-file "$REPO_ROOT/.env")

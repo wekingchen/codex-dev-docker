@@ -1,0 +1,42 @@
+Port 2222
+ListenAddress 0.0.0.0
+AddressFamily any
+
+HostKey /etc/ssh/codex-host-keys/ssh_host_ed25519_key
+PidFile /run/sshd.pid
+AuthorizedKeysFile /run/codex-ssh/authorized_keys
+
+PermitRootLogin no
+AllowUsers __DEV_USER__
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitEmptyPasswords no
+MaxAuthTries 3
+LoginGraceTime 30
+StrictModes yes
+UsePAM no
+
+IgnoreRhosts yes
+HostbasedAuthentication no
+PermitUserEnvironment no
+DisableForwarding yes
+AllowAgentForwarding no
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+GatewayPorts no
+X11Forwarding no
+PermitTunnel no
+
+PermitTTY yes
+PrintMotd no
+PrintLastLog yes
+TCPKeepAlive yes
+ClientAliveInterval 60
+ClientAliveCountMax 3
+UseDNS no
+LogLevel VERBOSE
+
+Subsystem sftp internal-sftp

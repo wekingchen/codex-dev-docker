@@ -4,9 +4,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 COMPOSE_ARGS=(--project-directory "$REPO_ROOT" -f "$REPO_ROOT/compose.yaml")
+REMOTE_COMPOSE_ARGS=(
+  --project-directory "$REPO_ROOT"
+  -f "$REPO_ROOT/compose.yaml"
+  -f "$REPO_ROOT/compose.remote.yaml"
+  --profile remote
+)
 
 if [ -f "$REPO_ROOT/.env" ]; then
   COMPOSE_ARGS+=(--env-file "$REPO_ROOT/.env")
+  REMOTE_COMPOSE_ARGS+=(--env-file "$REPO_ROOT/.env")
+fi
+
+remote_container="$(docker compose "${REMOTE_COMPOSE_ARGS[@]}" ps --status running -q codex-ssh 2>/dev/null || true)"
+if [ -n "$remote_container" ]; then
+  echo "Codex远程服务正在复用同一个home和workspace，拒绝并发启动本地容器。" >&2
+  echo "请先运行：$REPO_ROOT/scripts/remote.sh down" >&2
+  exit 1
 fi
 
 if [ -z "${SSH_AUTH_SOCK:-}" ] || [ ! -S "$SSH_AUTH_SOCK" ]; then

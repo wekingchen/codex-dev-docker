@@ -2,5 +2,6 @@
 .github
 .env
 workspace
+.codex-ssh
 *.log
 .DS_Store

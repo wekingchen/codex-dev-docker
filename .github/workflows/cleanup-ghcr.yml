@@ -8,13 +8,21 @@ on:
         required: true
         default: true
         type: boolean
+      package_name:
+        description: 要清理的GHCR package
+        required: true
+        default: codex-dev-base
+        type: choice
+        options:
+          - codex-dev-base
+          - codex-dev-remote
       max_delete:
         description: 本次最多删除数量（硬上限 10）
         required: true
         default: "1"
         type: string
       confirm:
-        description: 真正删除时必须填写 codex-dev-base
+        description: 真正删除时必须精确填写所选package名称
         required: false
         default: ""
         type: string
@@ -31,7 +39,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PACKAGE_NAME: codex-dev-base
   PACKAGE_TYPE: container
   KEEP_RECENT_NON_RELEASE: 10
   OWNER: ${{ github.repository_owner }}
@@ -39,8 +46,14 @@ env:
 
 jobs:
   cleanup:
-    name: 安全清理旧的临时镜像版本
+    name: 安全清理 ${{ matrix.package_name }} 旧的临时镜像版本
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        package_name: ${{ github.event_name == 'schedule' && fromJSON('["codex-dev-base","codex-dev-remote"]') || fromJSON(format('["{0}"]', inputs.package_name)) }}
+    env:
+      PACKAGE_NAME: ${{ matrix.package_name }}
 
     steps:
       - name: 分页读取、分类并清理旧版本
@@ -183,7 +196,8 @@ jobs:
 
           deferred=$((candidate_total - delete_limit))
           {
-            echo "### GHCR cleanup"
+            echo "### GHCR cleanup: $PACKAGE_NAME"
+            echo "- Package: \`$PACKAGE_NAME\`"
             echo "- Owner type: \`$owner_type\`"
             echo "- 总版本数：$total"
             echo "- 受保护：$protected_total"

@@ -1,0 +1,74 @@
+services:
+  codex-ssh-hostkey-init:
+    profiles: [remote]
+    image: ${CODEX_REMOTE_IMAGE:-ghcr.io/wekingchen/codex-dev-remote:latest}
+    pull_policy: ${CODEX_DEV_PULL_POLICY:-always}
+    entrypoint: ["/usr/local/bin/remote-hostkey-init.sh"]
+    network_mode: none
+    restart: "no"
+    volumes:
+      - type: volume
+        source: codex-dev-remote-hostkeys
+        target: /etc/ssh/codex-host-keys
+    cap_drop:
+      - NET_BIND_SERVICE
+      - NET_RAW
+
+  codex-ssh:
+    profiles: [remote]
+    image: ${CODEX_REMOTE_IMAGE:-ghcr.io/wekingchen/codex-dev-remote:latest}
+    pull_policy: ${CODEX_DEV_PULL_POLICY:-always}
+    depends_on:
+      codex-ssh-hostkey-init:
+        condition: service_completed_successfully
+    working_dir: /workspace
+    init: true
+    restart: unless-stopped
+    pids_limit: 256
+    stop_grace_period: 20s
+    ports:
+      - target: 2222
+        published: ${CODEX_REMOTE_PORT:-2222}
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: ${WORKSPACE:-./workspace}
+        target: /workspace
+        bind:
+          create_host_path: false
+      - type: volume
+        source: codex-dev-home
+        target: /home/dev
+      - type: volume
+        source: codex-dev-remote-hostkeys
+        target: /etc/ssh/codex-host-keys
+        read_only: true
+      - type: bind
+        source: ./.codex-ssh/authorized_keys
+        target: /etc/codex-ssh/authorized_keys.input
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      CODEX_HOME: /home/dev/.codex
+      MISE_DATA_DIR: /home/dev/.local/share/mise
+      MISE_CONFIG_DIR: /home/dev/.config/mise
+      HOST_UID: ${HOST_UID:-}
+      HOST_GID: ${HOST_GID:-}
+    tmpfs:
+      - /run:rw,nosuid,nodev,size=16m,mode=0755
+      - /tmp:rw,nosuid,nodev,size=256m,mode=1777
+    cap_drop:
+      - NET_BIND_SERVICE
+      - NET_RAW
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 2222"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  codex-dev-remote-hostkeys:
+    name: ${CODEX_REMOTE_HOST_KEY_VOLUME:-codex-dev-remote-hostkeys}

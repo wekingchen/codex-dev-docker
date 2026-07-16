@@ -104,11 +104,12 @@ while IFS= read -r match; do
 done < <(grep -RInE '^[[:space:]]*uses:[[:space:]]+[^./][^[:space:]]*@' "$REPO_ROOT/.github/workflows" | sort)
 
 # Ubuntu 必须固定当前 tag 的多架构根 index，并包含 amd64/arm64。
-from_line="$(grep -E '^FROM ubuntu:[^@]+@sha256:[0-9a-f]{64}$' "$REPO_ROOT/base/Dockerfile" || true)"
+from_line="$(grep -E '^FROM ubuntu:[^@]+@sha256:[0-9a-f]{64}([[:space:]]+AS[[:space:]]+[A-Za-z0-9._-]+)?$' "$REPO_ROOT/base/Dockerfile" || true)"
 if [ -z "$from_line" ]; then
   report_error "Dockerfile 未使用 ubuntu tag + 64 位根 digest"
 else
   ubuntu_ref="${from_line#FROM ubuntu:}"
+  ubuntu_ref="${ubuntu_ref%% AS *}"
   ubuntu_tag="${ubuntu_ref%@sha256:*}"
   pinned_ubuntu_digest="sha256:${ubuntu_ref##*@sha256:}"
   ubuntu_response="$(curl --fail --silent --show-error --retry 3 \

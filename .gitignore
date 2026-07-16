@@ -1,4 +1,5 @@
 workspace/
+.codex-ssh/
 .env
 .DS_Store
 *.log

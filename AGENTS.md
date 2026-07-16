@@ -65,3 +65,16 @@
 - Codex CLI 是明确例外：必须继续动态解析 `openai/codex` 官方 latest，并通过官方 installer 安装，不得在仓库中静态固定版本。
 - provenance、SBOM 和漏洞扫描必须针对最终 registry candidate 根 digest，并在 promotion 前完成。
 - 未确认 OCI referrer 可达关系前，GHCR cleanup 必须继续保护所有 untagged versions。
+
+## 远程 SSH 规则
+
+- 默认 base 镜像不得安装或启动 `sshd`；服务端SSH只能存在于独立 `remote` target和 `codex-dev-remote` package。
+- 宿主发布端口必须在Compose中固定绑定 `127.0.0.1`，不得提供 `0.0.0.0`、空host IP或公网绑定开关。
+- 只允许 `dev` 公钥认证；必须禁止root、password、keyboard-interactive、空密码和用户环境注入。
+- 必须禁止SSH Agent、TCP、Unix socket、X11、GatewayPorts和tunnel forwarding。
+- SSH host private key只能在运行时生成到独立named volume；不得进入镜像、仓库、build context或home volume。
+- 本地授权文件固定放在被Git和Docker排除的 `.codex-ssh/`；容器内生效副本必须位于home之外并由root控制。
+- 远程服务不得挂载Docker socket、宿主机私钥、宿主根目录或SSH Agent socket。
+- 本地交互和远程服务复用home/workspace时，必须通过共享volume中的 `flock` fail closed；不得仅依赖包装脚本预检查。
+- 远程 `dev` 当前保留 `NOPASSWD sudo`，因此文档和审查都必须把授权公钥视为等价于容器root。
+- base与remote candidate必须使用同一Codex official latest身份，并在两个package都通过双架构smoke、provenance、SBOM和漏洞扫描后才允许promotion。

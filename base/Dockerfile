@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM ubuntu:26.04@sha256:651ba3fe3a830441e3deaf70fafac40d808a6bd2800a6f2c43130055159f23e6
+FROM ubuntu:26.04@sha256:651ba3fe3a830441e3deaf70fafac40d808a6bd2800a6f2c43130055159f23e6 AS runtime
 
 ARG TARGETARCH
 ARG USERNAME=dev
@@ -23,7 +23,7 @@ ENV MISE_DATA_DIR=/home/${USERNAME}/.local/share/mise
 ENV MISE_CONFIG_DIR=/home/${USERNAME}/.config/mise
 ENV PATH=/home/${USERNAME}/.local/share/mise/shims:/usr/local/bin:/home/${USERNAME}/.local/bin:${PATH}
 
-# 这个镜像只作为 Codex 通用运行底座，不预装完整技术栈。
+# 共享 runtime 只提供 Codex 通用工具，不预装完整技术栈。
 # 项目需要的语言运行时和依赖，后续由 Codex 根据项目内容在容器内安装。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
@@ -80,6 +80,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bc \
     locales \
     tzdata \
+    util-linux \
     && locale-gen en_US.UTF-8 zh_TW.UTF-8 zh_CN.UTF-8 \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
@@ -161,19 +162,41 @@ LABEL io.codex-dev.mise.source="https://github.com/jdx/mise" \
       io.codex-dev.codex.release-tag="${CODEX_RELEASE_TAG}" \
       io.codex-dev.codex.version="${CODEX_RELEASE}"
 
-COPY scripts/dev-entrypoint.sh /usr/local/bin/dev-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/dev-entrypoint.sh
+COPY --chmod=0755 scripts/dev-init.sh /usr/local/lib/codex-dev/dev-init.sh
 
 USER ${USERNAME}
-
 RUN mkdir -p "${CODEX_HOME}" "${MISE_DATA_DIR}" "${MISE_CONFIG_DIR}" /home/${USERNAME}/.cache \
     && printf '\n# mise\nif command -v mise >/dev/null 2>&1; then\n  eval "$(mise activate bash)"\nfi\n\n# direnv\nif command -v direnv >/dev/null 2>&1; then\n  eval "$(direnv hook bash)"\nfi\n' >> /home/${USERNAME}/.bashrc \
     && printf '\n# mise\nif command -v mise >/dev/null 2>&1; then\n  eval "$(mise activate bash)"\nfi\n' >> /home/${USERNAME}/.profile
 
-# 最终保持 root 运行 entrypoint。
-# entrypoint 会自动修正 /home/dev volume 权限，然后用 gosu 降权为 dev。
-USER root
-WORKDIR /workspace
+# 远程镜像独立增加 sshd，base 镜像不承担服务端 SSH 攻击面。
+FROM runtime AS remote
 
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server \
+    && rm -f /etc/ssh/ssh_host_* \
+    && install -d -m 0700 /etc/ssh/codex-host-keys \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --chmod=0644 remote/sshd_config /etc/ssh/codex_sshd_config
+COPY --chmod=0755 scripts/remote-entrypoint.sh /usr/local/bin/remote-entrypoint.sh
+COPY --chmod=0755 scripts/remote-hostkey-init.sh /usr/local/bin/remote-hostkey-init.sh
+COPY --chmod=0755 scripts/validate-authorized-keys.sh /usr/local/bin/validate-authorized-keys.sh
+
+LABEL io.codex-dev.image.role="remote"
+
+WORKDIR /workspace
+EXPOSE 2222
+ENTRYPOINT ["/usr/local/bin/remote-entrypoint.sh"]
+
+# base 必须保持为最后一个 target，使未指定 --target 的现有构建行为不变。
+FROM runtime AS base
+
+USER root
+COPY --chmod=0755 scripts/dev-entrypoint.sh /usr/local/bin/dev-entrypoint.sh
+
+LABEL io.codex-dev.image.role="base"
+
+WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/dev-entrypoint.sh"]
 CMD ["/bin/bash"]
