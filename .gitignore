@@ -1,5 +1,8 @@
 workspace/
 .codex-ssh/
+**/.claude/.credentials.json
+**/.claude/settings.local.json
+**/.claude.json
 .env
 .DS_Store
 *.log

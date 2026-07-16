@@ -31,5 +31,12 @@ if [ "$(uname -s)" = "Linux" ]; then
   export HOST_GID="${HOST_GID:-$(id -g)}"
 fi
 
-echo "正在启动 Codex 开发容器..."
-exec docker compose "${COMPOSE_ARGS[@]}" run --rm codex
+if [ "$#" -eq 0 ]; then
+  echo "正在启动开发容器..."
+  exec docker compose "${COMPOSE_ARGS[@]}" run --rm codex
+fi
+
+printf '正在开发容器中执行：'
+printf ' %q' "$@"
+printf '\n'
+exec docker compose "${COMPOSE_ARGS[@]}" run --rm codex "$@"

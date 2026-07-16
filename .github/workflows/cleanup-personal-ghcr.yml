@@ -1,0 +1,243 @@
+name: 清理私有 personal GHCR 旧版本
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 只列出候选，不执行删除
+        required: true
+        default: true
+        type: boolean
+      package_name:
+        description: 要清理的私有GHCR package
+        required: true
+        default: codex-dev-personal-base
+        type: choice
+        options:
+          - codex-dev-personal-base
+          - codex-dev-personal-remote
+      max_delete:
+        description: 本次最多删除数量（硬上限10）
+        required: true
+        default: "1"
+        type: string
+      confirm:
+        description: 真正删除时必须精确填写所选package名称
+        required: false
+        default: ""
+        type: string
+  schedule:
+    # 每周日 UTC 07:17 强制演练两个私有package；定时任务永不执行删除。
+    - cron: "17 7 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-dev-package-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  KEEP_RECENT_CANDIDATES: 10
+  HARD_MAX_DELETE: 10
+
+jobs:
+  cleanup:
+    name: 安全清理 ${{ matrix.package_name }} 未提升candidate
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        package_name: ${{ github.event_name == 'schedule' && fromJSON('["codex-dev-personal-base","codex-dev-personal-remote"]') || fromJSON(format('["{0}"]', inputs.package_name)) }}
+    env:
+      PACKAGE_NAME: ${{ matrix.package_name }}
+      GHCR_PRIVATE_GUARD_TOKEN: ${{ secrets.GHCR_PRIVATE_GUARD_TOKEN }}
+      GHCR_PRIVATE_CLEANUP_TOKEN: ${{ secrets.GHCR_PRIVATE_CLEANUP_TOKEN }}
+      INPUT_DRY_RUN: ${{ inputs.dry_run }}
+      INPUT_MAX_DELETE: ${{ inputs.max_delete }}
+      INPUT_CONFIRM: ${{ inputs.confirm }}
+
+    steps:
+      - name: 检查私有可见性并保守清理旧版本
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "$GHCR_PRIVATE_GUARD_TOKEN" ]; then
+            echo "缺少GHCR_PRIVATE_GUARD_TOKEN；无法验证私有可见性或执行清理。" >&2
+            exit 1
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            dry_run=true
+            max_delete=5
+            confirm=""
+          else
+            dry_run="${INPUT_DRY_RUN:-true}"
+            max_delete="${INPUT_MAX_DELETE:-1}"
+            confirm="${INPUT_CONFIRM:-}"
+          fi
+
+          case "$max_delete" in
+            0|1|2|3|4|5|6|7|8|9|10) ;;
+            *)
+              echo "max_delete只允许0到$HARD_MAX_DELETE：$max_delete" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ "$dry_run" != true ] && [ "$dry_run" != false ]; then
+            echo "dry_run只能是true或false。" >&2
+            exit 1
+          fi
+
+          if [ "$dry_run" = false ] && [ "$confirm" != "$PACKAGE_NAME" ]; then
+            echo "真正删除时，confirm必须精确填写$PACKAGE_NAME。" >&2
+            exit 1
+          fi
+
+          api() {
+            curl --fail --silent --show-error --retry 3 \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer ${GHCR_PRIVATE_GUARD_TOKEN}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "$@"
+          }
+
+          cleanup_api() {
+            curl --fail --silent --show-error --retry 3 \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer ${GHCR_PRIVATE_CLEANUP_TOKEN}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "$@"
+          }
+
+          expected_owner="$(tr '[:upper:]' '[:lower:]' <<< "$GITHUB_REPOSITORY_OWNER")"
+          guard_login="$(api 'https://api.github.com/user' | jq -r '.login // empty' | tr '[:upper:]' '[:lower:]')"
+          if [ "$guard_login" != "$expected_owner" ]; then
+            echo "停止清理：guard token持有人不是目标owner。期望$expected_owner，实际${guard_login:-<无法读取>}" >&2
+            exit 1
+          fi
+
+          if [ "$dry_run" = false ]; then
+            if [ -z "$GHCR_PRIVATE_CLEANUP_TOKEN" ]; then
+              echo "真正删除时必须配置独立的GHCR_PRIVATE_CLEANUP_TOKEN。" >&2
+              exit 1
+            fi
+            cleanup_login="$(cleanup_api 'https://api.github.com/user' | jq -r '.login // empty' | tr '[:upper:]' '[:lower:]')"
+            if [ "$cleanup_login" != "$expected_owner" ]; then
+              echo "停止清理：cleanup token持有人不是目标owner。期望$expected_owner，实际${cleanup_login:-<无法读取>}" >&2
+              exit 1
+            fi
+          fi
+
+          package_url="https://api.github.com/user/packages/container/${PACKAGE_NAME}"
+          package_response="$(api "$package_url")"
+          visibility="$(jq -r '.visibility // empty' <<< "$package_response")"
+          package_owner="$(jq -r '.owner.login // empty' <<< "$package_response" | tr '[:upper:]' '[:lower:]')"
+          linked_repository="$(jq -r '.repository.full_name // empty' <<< "$package_response")"
+          if { [ -n "$package_owner" ] && [ "$package_owner" != "$expected_owner" ]; } \
+            || [ "$visibility" != private ] || [ -n "$linked_repository" ]; then
+            echo "停止清理：$PACKAGE_NAME必须属于owner、visibility为private且不关联repository。" >&2
+            exit 1
+          fi
+
+          versions_url="${package_url}/versions"
+          printf '[]\n' > versions.json
+          page=1
+          while :; do
+            page_file="versions.page-${page}.json"
+            api "${versions_url}?per_page=100&page=${page}" > "$page_file"
+            page_count="$(jq 'length' "$page_file")"
+            jq -s '.[0] + .[1]' versions.json "$page_file" > versions.next.json
+            mv versions.next.json versions.json
+            if [ "$page_count" -lt 100 ]; then
+              break
+            fi
+            page=$((page + 1))
+          done
+
+          jq '
+            def is_semver:
+              test("^v?[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$");
+            def is_date:
+              test("^[0-9]{8}$");
+            def is_commit:
+              test("^[0-9a-f]{7,40}$");
+            def is_candidate:
+              test("^candidate-[0-9]+-[0-9]+$");
+            map(
+              (.metadata.container.tags // []) as $tags |
+              . + {
+                tags: $tags,
+                cleanup_class: (
+                  if ($tags | length) == 0 then
+                    "protected-untagged"
+                  elif any($tags[]; . == "latest" or is_semver or is_date or is_commit) then
+                    "protected-release"
+                  elif all($tags[]; is_candidate) then
+                    "eligible-candidate"
+                  else
+                    "protected-unknown"
+                  end
+                )
+              }
+            )
+          ' versions.json > versions.classified.json
+
+          jq '[.[] | select(.cleanup_class == "eligible-candidate")] | sort_by(.updated_at) | reverse' \
+            versions.classified.json > eligible.json
+          jq '[.[] | select(.cleanup_class != "eligible-candidate")] | sort_by(.updated_at) | reverse' \
+            versions.classified.json > protected.json
+          jq --argjson keep "$KEEP_RECENT_CANDIDATES" '.[$keep:]' eligible.json > delete-candidates.json
+
+          total="$(jq 'length' versions.json)"
+          protected_total="$(jq 'length' protected.json)"
+          eligible_total="$(jq 'length' eligible.json)"
+          candidate_total="$(jq 'length' delete-candidates.json)"
+          if [ "$candidate_total" -lt "$max_delete" ]; then
+            delete_limit="$candidate_total"
+          else
+            delete_limit="$max_delete"
+          fi
+
+          jq -r '.[] | "保留 id=\(.id) class=\(.cleanup_class) tags=[\(.tags | join(","))]"' protected.json
+
+          if [ "$delete_limit" -gt 0 ]; then
+            jq -c --argjson limit "$delete_limit" '.[:$limit][]' delete-candidates.json | while IFS= read -r item; do
+              id="$(jq -r '.id' <<< "$item")"
+              updated_at="$(jq -r '.updated_at' <<< "$item")"
+              tags="$(jq -r '.tags | join(",")' <<< "$item")"
+              echo "删除候选：id=$id 更新时间=$updated_at 标签=[$tags]"
+
+              if [ "$dry_run" = true ]; then
+                echo "当前是演练模式，不执行删除。"
+              else
+                # 删除前再次fail-closed检查可见性，避免长分页期间package状态变化。
+                package_response="$(api "$package_url")"
+                visibility="$(jq -r '.visibility // empty' <<< "$package_response")"
+                package_owner="$(jq -r '.owner.login // empty' <<< "$package_response" | tr '[:upper:]' '[:lower:]')"
+                linked_repository="$(jq -r '.repository.full_name // empty' <<< "$package_response")"
+                if { [ -n "$package_owner" ] && [ "$package_owner" != "$expected_owner" ]; } \
+                  || [ "$visibility" != private ] || [ -n "$linked_repository" ]; then
+                  echo "删除前owner、visibility或repository关联复核失败：$PACKAGE_NAME" >&2
+                  exit 1
+                fi
+                cleanup_api --request DELETE "${versions_url}/${id}" >/dev/null
+                echo "已删除版本：id=$id"
+              fi
+            done
+          fi
+
+          deferred=$((candidate_total - delete_limit))
+          {
+            echo "### Private GHCR cleanup: $expected_owner/$PACKAGE_NAME"
+            echo "- Visibility: \`private\`"
+            echo "- 总版本数：$total"
+            echo "- 受保护：$protected_total"
+            echo "- 未提升candidate版本：$eligible_total（保留最新$KEEP_RECENT_CANDIDATES个）"
+            echo "- 删除候选：$candidate_total"
+            echo "- 本次处理上限：$delete_limit"
+            echo "- 延后处理：$deferred"
+            echo "- Dry run: \`$dry_run\`"
+          } >> "$GITHUB_STEP_SUMMARY"

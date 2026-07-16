@@ -196,8 +196,10 @@ jobs:
             CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=codex-dev-base
             org.opencontainers.image.description=Codex 通用 Docker 运行底座。项目依赖由 Codex 后续在容器内按需安装。
+            io.codex-dev.release-set=public-${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha,scope=codex-${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=codex-${{ matrix.name }}
 
@@ -225,8 +227,10 @@ jobs:
             CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=codex-dev-remote
             org.opencontainers.image.description=通过宿主机SSH ProxyJump访问的key-only Codex远程运行镜像。
+            io.codex-dev.release-set=public-${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: |
             type=gha,scope=codex-${{ matrix.name }}
             type=gha,scope=codex-remote-${{ matrix.name }}
@@ -306,8 +310,10 @@ jobs:
             CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=codex-dev-base
             org.opencontainers.image.description=Codex 通用 Docker 运行底座。项目依赖由 Codex 后续在容器内按需安装。
+            io.codex-dev.release-set=public-${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: |
             type=gha,scope=codex-amd64
             type=gha,scope=codex-arm64
@@ -388,8 +394,10 @@ jobs:
             CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=codex-dev-remote
             org.opencontainers.image.description=通过宿主机SSH ProxyJump访问的key-only Codex远程运行镜像。
+            io.codex-dev.release-set=public-${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: |
             type=gha,scope=codex-remote-amd64
             type=gha,scope=codex-remote-arm64

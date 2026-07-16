@@ -1,0 +1,37 @@
+name: 审计私有 Claude 派生供应链
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每周一 UTC 06:47 只读检查Claude签名链、私有Dockerfile边界和可选GHCR visibility。
+    - cron: "47 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: 检查 Claude 官方签名链与私有发布边界
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 运行只读私有供应链审计
+        env:
+          GHCR_PRIVATE_GUARD_TOKEN: ${{ secrets.GHCR_PRIVATE_GUARD_TOKEN }}
+          GHCR_PRIVATE_OWNER: ${{ github.repository_owner }}
+          AUDIT_EVIDENCE_DIR: ${{ runner.temp }}/claude-private-audit-evidence
+        run: ./scripts/audit-claude-private-supply-chain.sh
+
+      - name: 上传签名审计证据
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: claude-private-supply-chain-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/claude-private-audit-evidence
+          if-no-files-found: error
+          retention-days: 30

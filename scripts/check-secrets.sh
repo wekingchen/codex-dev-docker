@@ -12,6 +12,16 @@ if [ -n "$tracked_local_ssh" ]; then
   failed=true
 fi
 
+tracked_claude_state="$(git -C "$REPO_ROOT" ls-files -- \
+  ':(glob)**/.claude/.credentials.json' \
+  ':(glob)**/.claude/settings.local.json' \
+  ':(glob)**/.claude.json')"
+if [ -n "$tracked_claude_state" ]; then
+  echo "禁止跟踪Claude用户状态或凭据文件：" >&2
+  printf '%s\n' "$tracked_claude_state" >&2
+  failed=true
+fi
+
 while IFS= read -r -d '' file; do
   basename="${file##*/}"
   case "$basename" in
@@ -33,6 +43,17 @@ if [ -n "$private_key_headers" ]; then
   failed=true
 fi
 
+anthropic_tokens="$(
+  git -C "$REPO_ROOT" grep -n -I -E \
+    '(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN)[[:space:]]*[:=][[:space:]]*"?(sk-ant-|[A-Za-z0-9_-]{32,})' \
+    -- . ':(exclude)scripts/check-secrets.sh' || true
+)"
+if [ -n "$anthropic_tokens" ]; then
+  echo "受Git跟踪的文件中发现疑似Anthropic认证值：" >&2
+  printf '%s\n' "$anthropic_tokens" >&2
+  failed=true
+fi
+
 if ! git -C "$REPO_ROOT" check-ignore -q .codex-ssh/authorized_keys; then
   echo ".gitignore没有排除.codex-ssh/authorized_keys。" >&2
   failed=true
@@ -43,9 +64,29 @@ if ! grep -Eq '^\.codex-ssh/?$' "$REPO_ROOT/.dockerignore"; then
   failed=true
 fi
 
+for path in \
+  .claude/.credentials.json \
+  .claude/settings.local.json \
+  .claude.json \
+  nested/project/.claude/.credentials.json \
+  nested/project/.claude/settings.local.json \
+  nested/project/.claude.json; do
+  if ! git -C "$REPO_ROOT" check-ignore -q "$path"; then
+    echo ".gitignore没有排除Claude用户状态：$path" >&2
+    failed=true
+  fi
+done
+
+for pattern in '**/.claude/.credentials.json' '**/.claude/settings.local.json' '**/.claude.json'; do
+  if ! grep -Fqx "$pattern" "$REPO_ROOT/.dockerignore"; then
+    echo ".dockerignore没有排除Claude用户状态：$pattern" >&2
+    failed=true
+  fi
+done
+
 if [ "$failed" = true ]; then
   echo "秘密材料检查失败。" >&2
   exit 1
 fi
 
-echo "秘密材料检查通过：未跟踪本地SSH目录、私钥文件或私钥内容。"
+echo "秘密材料检查通过：未跟踪本地SSH目录、私钥或Claude认证状态。"

@@ -1,0 +1,1464 @@
+name: 构建私有 Codex + Claude personal 镜像
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: build执行正常候选发布；bootstrap仅建立visibility probe
+        required: true
+        default: build
+        type: choice
+        options:
+          - build
+          - bootstrap
+      promote:
+        description: build模式通过全部门禁后是否移动正式标签
+        required: true
+        default: false
+        type: boolean
+  schedule:
+    # 公开镜像03:07构建后，于UTC 06:17解析父镜像和Claude latest并自动提升。
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-dev-package-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  BASE_PACKAGE: codex-dev-personal-base
+  REMOTE_PACKAGE: codex-dev-personal-remote
+  TRIVY_VERSION: "v0.72.0"
+
+jobs:
+  static:
+    name: 私有发布静态检查
+    runs-on: ubuntu-24.04
+    outputs:
+      release_date: ${{ steps.release-meta.outputs.release_date }}
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 固定本次发布日期
+        id: release-meta
+        shell: bash
+        run: echo "release_date=$(date -u +'%Y%m%d')" >> "$GITHUB_OUTPUT"
+
+      - name: 检查Shell脚本与执行权限
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/*.sh
+          shellcheck scripts/*.sh
+          bad_modes="$(git ls-files -s 'scripts/*.sh' | awk '$1 != "100755" {print}')"
+          if [ -n "$bad_modes" ]; then
+            echo "以下脚本没有以100755跟踪：" >&2
+            printf '%s\n' "$bad_modes" >&2
+            exit 1
+          fi
+
+      - name: 检查Compose与秘密材料
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --project-directory "$GITHUB_WORKSPACE" \
+            -f "$GITHUB_WORKSPACE/compose.yaml" config >/dev/null
+          docker compose --project-directory "$GITHUB_WORKSPACE" \
+            -f "$GITHUB_WORKSPACE/compose.yaml" \
+            -f "$GITHUB_WORKSPACE/compose.remote.yaml" \
+            --profile remote config >/dev/null
+          ./scripts/check-secrets.sh
+
+      - name: 检查硬编码与私有派生边界
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp
+          "$GITHUB_WORKSPACE/scripts/check-hardcoded.sh"
+          "$GITHUB_WORKSPACE/scripts/audit-claude-private-supply-chain.sh" \
+            --static-only \
+            --evidence-dir "$RUNNER_TEMP/claude-private-static-evidence"
+
+      - name: 检查空白错误
+        run: git diff --check
+
+  bootstrap-visibility:
+    name: Bootstrap ${{ matrix.package_name }} private visibility
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'bootstrap'
+    runs-on: ubuntu-24.04
+    needs:
+      - static
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        package_name:
+          - codex-dev-personal-base
+          - codex-dev-personal-remote
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 确认独立发布token属于目标owner
+        env:
+          GHCR_PRIVATE_PUBLISH_TOKEN: ${{ secrets.GHCR_PRIVATE_PUBLISH_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$GHCR_PRIVATE_PUBLISH_TOKEN" ]; then
+            echo "缺少GHCR_PRIVATE_PUBLISH_TOKEN。" >&2
+            exit 1
+          fi
+          expected_owner="$(tr '[:upper:]' '[:lower:]' <<< "$GITHUB_REPOSITORY_OWNER")"
+          publish_login="$(curl --fail --silent --show-error --retry 3 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GHCR_PRIVATE_PUBLISH_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            'https://api.github.com/user' | jq -r '.login // empty' | tr '[:upper:]' '[:lower:]')"
+          if [ "$publish_login" != "$expected_owner" ]; then
+            echo "publish token持有人不是目标owner：期望$expected_owner，实际${publish_login:-<无法读取>}" >&2
+            exit 1
+          fi
+
+      - name: 配置Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: 登录GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PRIVATE_PUBLISH_TOKEN }}
+
+      - name: 推送不含Codex或Claude的scratch probe
+        env:
+          PACKAGE_NAME: ${{ matrix.package_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner_lc="$(tr '[:upper:]' '[:lower:]' <<< "$GITHUB_REPOSITORY_OWNER")"
+          image="ghcr.io/${owner_lc}/${PACKAGE_NAME}:visibility-probe"
+          docker buildx build \
+            --file private/visibility-probe.Dockerfile \
+            --platform linux/amd64,linux/arm64 \
+            --provenance=false \
+            --sbom=false \
+            --tag "$image" \
+            --push .
+          echo "已推送visibility probe：$image"
+
+      - name: 使用独立guard token严格确认private
+        env:
+          PACKAGE_NAME: ${{ matrix.package_name }}
+          GHCR_PRIVATE_GUARD_TOKEN: ${{ secrets.GHCR_PRIVATE_GUARD_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$GHCR_PRIVATE_GUARD_TOKEN" ]; then
+            echo "缺少GHCR_PRIVATE_GUARD_TOKEN，无法完成bootstrap可见性确认。" >&2
+            exit 1
+          fi
+          expected_owner="$(tr '[:upper:]' '[:lower:]' <<< "$GITHUB_REPOSITORY_OWNER")"
+          guard_login="$(curl --fail --silent --show-error --retry 3 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GHCR_PRIVATE_GUARD_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            'https://api.github.com/user' | jq -r '.login // empty' | tr '[:upper:]' '[:lower:]')"
+          if [ "$guard_login" != "$expected_owner" ]; then
+            echo "guard token持有人不是发布目标owner：期望$expected_owner，实际${guard_login:-<无法读取>}" >&2
+            exit 1
+          fi
+          response="$(curl --fail --silent --show-error --retry 3 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GHCR_PRIVATE_GUARD_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/user/packages/container/${PACKAGE_NAME}")"
+          visibility="$(jq -r '.visibility // empty' <<< "$response")"
+          package_owner="$(jq -r '.owner.login // empty' <<< "$response" | tr '[:upper:]' '[:lower:]')"
+          linked_repository="$(jq -r '.repository.full_name // empty' <<< "$response")"
+          if { [ -n "$package_owner" ] && [ "$package_owner" != "$expected_owner" ]; } \
+            || [ "$visibility" != private ] || [ -n "$linked_repository" ]; then
+            echo "$PACKAGE_NAME 必须为owner本人、private且不关联repository：owner=${package_owner:-<无法读取>} visibility=${visibility:-<无法读取>} repository=${linked_repository:-<无>}" >&2
+            exit 1
+          fi
+          {
+            echo "### Bootstrap visibility"
+            echo "- Package: \`$PACKAGE_NAME\`"
+            echo "- Visibility: \`private\`"
+            echo "- Probe tag: \`visibility-probe\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  resolve-public:
+    name: 解析公开base/remote父镜像对
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'bootstrap'
+    runs-on: ubuntu-24.04
+    outputs:
+      base_image: ${{ steps.public.outputs.base_image }}
+      base_digest: ${{ steps.public.outputs.base_digest }}
+      base_ref: ${{ steps.public.outputs.base_ref }}
+      remote_image: ${{ steps.public.outputs.remote_image }}
+      remote_digest: ${{ steps.public.outputs.remote_digest }}
+      remote_ref: ${{ steps.public.outputs.remote_ref }}
+      release_set: ${{ steps.public.outputs.release_set }}
+      revision: ${{ steps.public.outputs.revision }}
+      codex_release_id: ${{ steps.public.outputs.codex_release_id }}
+      codex_release_tag: ${{ steps.public.outputs.codex_release_tag }}
+      codex_version: ${{ steps.public.outputs.codex_version }}
+      mise_version: ${{ steps.mise.outputs.mise_version }}
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 配置Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: 解析并验证公开父镜像对
+        id: public
+        run: ./scripts/resolve-public-release-pair.sh
+
+      - name: 从精确父镜像读取一致的mise版本
+        id: mise
+        env:
+          BASE_IMAGE: ${{ steps.public.outputs.base_image }}
+          BASE_REF: ${{ steps.public.outputs.base_ref }}
+          REMOTE_IMAGE: ${{ steps.public.outputs.remote_image }}
+          REMOTE_REF: ${{ steps.public.outputs.remote_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --raw "$BASE_REF" > base-index.json
+          docker buildx imagetools inspect --raw "$REMOTE_REF" > remote-index.json
+
+          reference=""
+          for role in base remote; do
+            if [ "$role" = base ]; then
+              image="$BASE_IMAGE"
+              index=base-index.json
+            else
+              image="$REMOTE_IMAGE"
+              index=remote-index.json
+            fi
+            for arch in amd64 arm64; do
+              child="$(jq -r --arg arch "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' "$index")"
+              docker buildx imagetools inspect "${image}@${child}" \
+                --format '{{json .Image.Config.Labels}}' > "${role}-${arch}-labels.json"
+              current="$(jq -r '.["io.codex-dev.mise.version"] // empty' "${role}-${arch}-labels.json")"
+              if ! [[ "$current" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+                echo "父镜像mise版本label无效：${role}/${arch} ${current:-<空>}" >&2
+                exit 1
+              fi
+              if [ -z "$reference" ]; then
+                reference="$current"
+              elif [ "$current" != "$reference" ]; then
+                echo "父镜像mise版本不一致：期望$reference，实际$current" >&2
+                exit 1
+              fi
+            done
+          done
+          echo "mise_version=${reference#v}" >> "$GITHUB_OUTPUT"
+          echo "- mise: \`${reference#v}\`（来自精确父镜像labels）" >> "$GITHUB_STEP_SUMMARY"
+
+  resolve-claude:
+    name: 解析并验签Claude官方latest
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'bootstrap'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.claude.outputs.version }}
+      stable_version: ${{ steps.claude.outputs.stable_version }}
+      commit: ${{ steps.claude.outputs.commit }}
+      build_date: ${{ steps.claude.outputs.build_date }}
+      manifest_sha256: ${{ steps.claude.outputs.manifest_sha256 }}
+      sha256_amd64: ${{ steps.claude.outputs.sha256_amd64 }}
+      sha256_arm64: ${{ steps.claude.outputs.sha256_arm64 }}
+      size_amd64: ${{ steps.claude.outputs.size_amd64 }}
+      size_arm64: ${{ steps.claude.outputs.size_arm64 }}
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 下载exact manifest并验证detached signature
+        id: claude
+        env:
+          AUDIT_EVIDENCE_DIR: ${{ runner.temp }}/claude-release-evidence
+        run: ./scripts/audit-claude-private-supply-chain.sh --resolve-only
+
+      - name: 上传Claude manifest签名证据
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: claude-release-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/claude-release-evidence
+          if-no-files-found: error
+          retention-days: 30
+
+  platform-smoke:
+    name: 本地构建并验证personal双镜像 ${{ matrix.platform }}
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'bootstrap'
+    runs-on: ubuntu-24.04
+    needs:
+      - static
+      - resolve-public
+      - resolve-claude
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            name: amd64
+          - platform: linux/arm64
+            name: arm64
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 配置QEMU多架构支持
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: 配置Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: 构建本地personal-base
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: private/Dockerfile
+          target: personal-base
+          platforms: ${{ matrix.platform }}
+          load: true
+          provenance: false
+          sbom: false
+          tags: codex-dev-personal-smoke-base:${{ matrix.name }}
+          build-args: |
+            PUBLIC_BASE_REF=${{ needs.resolve-public.outputs.base_ref }}
+            PUBLIC_REMOTE_REF=${{ needs.resolve-public.outputs.remote_ref }}
+            PUBLIC_RELEASE_SET=${{ needs.resolve-public.outputs.release_set }}
+            PERSONAL_RELEASE_SET=personal-${{ github.run_id }}-${{ github.run_attempt }}
+            CLAUDE_VERSION=${{ needs.resolve-claude.outputs.version }}
+            CLAUDE_COMMIT=${{ needs.resolve-claude.outputs.commit }}
+            CLAUDE_BUILD_DATE=${{ needs.resolve-claude.outputs.build_date }}
+            CLAUDE_MANIFEST_SHA256=${{ needs.resolve-claude.outputs.manifest_sha256 }}
+            CLAUDE_SHA256_AMD64=${{ needs.resolve-claude.outputs.sha256_amd64 }}
+            CLAUDE_SHA256_ARM64=${{ needs.resolve-claude.outputs.sha256_arm64 }}
+            CLAUDE_SIZE_AMD64=${{ needs.resolve-claude.outputs.size_amd64 }}
+            CLAUDE_SIZE_ARM64=${{ needs.resolve-claude.outputs.size_arm64 }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.codex-dev.build.repository=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=codex-dev-personal-base
+            org.opencontainers.image.description=基于公开Codex base并固定安装已验签Claude Code的个人私有镜像。
+            io.codex-dev.release-set=personal-${{ github.run_id }}-${{ github.run_attempt }}
+          cache-from: type=gha,scope=personal-base-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=personal-base-${{ matrix.name }}
+
+      - name: Smoke personal-base
+        env:
+          EXPECTED_CLAUDE_VERSION: ${{ needs.resolve-claude.outputs.version }}
+          EXPECTED_CLAUDE_SHA256: ${{ matrix.name == 'amd64' && needs.resolve-claude.outputs.sha256_amd64 || needs.resolve-claude.outputs.sha256_arm64 }}
+        run: |
+          ./scripts/smoke-image.sh \
+            codex-dev-personal-smoke-base:${{ matrix.name }} \
+            "${{ needs.resolve-public.outputs.codex_version }}" \
+            "${{ matrix.platform }}" \
+            "${{ needs.resolve-public.outputs.mise_version }}"
+
+      - name: 构建本地personal-remote
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: private/Dockerfile
+          target: personal-remote
+          platforms: ${{ matrix.platform }}
+          load: true
+          provenance: false
+          sbom: false
+          tags: codex-dev-personal-smoke-remote:${{ matrix.name }}
+          build-args: |
+            PUBLIC_BASE_REF=${{ needs.resolve-public.outputs.base_ref }}
+            PUBLIC_REMOTE_REF=${{ needs.resolve-public.outputs.remote_ref }}
+            PUBLIC_RELEASE_SET=${{ needs.resolve-public.outputs.release_set }}
+            PERSONAL_RELEASE_SET=personal-${{ github.run_id }}-${{ github.run_attempt }}
+            CLAUDE_VERSION=${{ needs.resolve-claude.outputs.version }}
+            CLAUDE_COMMIT=${{ needs.resolve-claude.outputs.commit }}
+            CLAUDE_BUILD_DATE=${{ needs.resolve-claude.outputs.build_date }}
+            CLAUDE_MANIFEST_SHA256=${{ needs.resolve-claude.outputs.manifest_sha256 }}
+            CLAUDE_SHA256_AMD64=${{ needs.resolve-claude.outputs.sha256_amd64 }}
+            CLAUDE_SHA256_ARM64=${{ needs.resolve-claude.outputs.sha256_arm64 }}
+            CLAUDE_SIZE_AMD64=${{ needs.resolve-claude.outputs.size_amd64 }}
+            CLAUDE_SIZE_ARM64=${{ needs.resolve-claude.outputs.size_arm64 }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.codex-dev.build.repository=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=codex-dev-personal-remote
+            org.opencontainers.image.description=基于公开Codex remote并固定安装已验签Claude Code的个人私有SSH镜像。
+            io.codex-dev.release-set=personal-${{ github.run_id }}-${{ github.run_attempt }}
+          cache-from: |
+            type=gha,scope=personal-base-${{ matrix.name }}
+            type=gha,scope=personal-remote-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=personal-remote-${{ matrix.name }}
+
+      - name: Smoke personal-remote SSH
+        env:
+          EXPECTED_CLAUDE_VERSION: ${{ needs.resolve-claude.outputs.version }}
+          EXPECTED_CLAUDE_SHA256: ${{ matrix.name == 'amd64' && needs.resolve-claude.outputs.sha256_amd64 || needs.resolve-claude.outputs.sha256_arm64 }}
+        run: |
+          ./scripts/smoke-remote-ssh.sh \
+            codex-dev-personal-smoke-remote:${{ matrix.name }} \
+            "${{ needs.resolve-public.outputs.codex_version }}" \
+            "${{ matrix.platform }}" \
+            "${{ needs.resolve-public.outputs.mise_version }}" \
+            codex-dev-personal-smoke-base:${{ matrix.name }}
+
+  registry-preflight:
+    name: 发布前fail-closed检查两个package为private
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build')
+    runs-on: ubuntu-24.04
+    needs:
+      - static
+      - resolve-public
+      - resolve-claude
+      - platform-smoke
+
+    steps:
+      - name: 使用独立guard token检查visibility
+        env:
+          GHCR_PRIVATE_GUARD_TOKEN: ${{ secrets.GHCR_PRIVATE_GUARD_TOKEN }}
+          GHCR_PRIVATE_PUBLISH_TOKEN: ${{ secrets.GHCR_PRIVATE_PUBLISH_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$GHCR_PRIVATE_GUARD_TOKEN" ]; then
+            echo "缺少GHCR_PRIVATE_GUARD_TOKEN。请先以bootstrap模式建立并确认private package。" >&2
+            exit 1
+          fi
+          if [ -z "$GHCR_PRIVATE_PUBLISH_TOKEN" ]; then
+            echo "缺少GHCR_PRIVATE_PUBLISH_TOKEN。" >&2
+            exit 1
+          fi
+          expected_owner="$(tr '[:upper:]' '[:lower:]' <<< "$GITHUB_REPOSITORY_OWNER")"
+          guard_login="$(curl --fail --silent --show-error --retry 3 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GHCR_PRIVATE_GUARD_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            'https://api.github.com/user' | jq -r '.login // empty' | tr '[:upper:]' '[:lower:]')"
+          if [ "$guard_login" != "$expected_owner" ]; then
+            echo "停止发布：guard token持有人不是发布目标owner。" >&2
+            exit 1
+          fi
+          publish_login="$(curl --fail --silent --show-error --retry 3 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GHCR_PRIVATE_PUBLISH_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            'https://api.github.com/user' | jq -r '.login // empty' | tr '[:upper:]' '[:lower:]')"
+          if [ "$publish_login" != "$expected_owner" ]; then
+            echo "停止发布：publish token持有人不是发布目标owner。" >&2
+            exit 1
+          fi
+          for package in "$BASE_PACKAGE" "$REMOTE_PACKAGE"; do
+            response="$(curl --fail --silent --show-error --retry 3 \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer ${GHCR_PRIVATE_GUARD_TOKEN}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/user/packages/container/${package}")"
+            visibility="$(jq -r '.visibility // empty' <<< "$response")"
+            package_owner="$(jq -r '.owner.login // empty' <<< "$response" | tr '[:upper:]' '[:lower:]')"
+            linked_repository="$(jq -r '.repository.full_name // empty' <<< "$response")"
+            if { [ -n "$package_owner" ] && [ "$package_owner" != "$expected_owner" ]; } \
+              || [ "$visibility" != private ] || [ -n "$linked_repository" ]; then
+              echo "停止发布：$package必须存在、属于owner、visibility为private且不关联repository。请重新检查bootstrap。" >&2
+              exit 1
+            fi
+          done
+          echo "两个personal package均已确认private且未关联repository；显式用户/Actions ACL仍需owner人工保持为空。" >> "$GITHUB_STEP_SUMMARY"
+
+  publish-base:
+    name: 发布personal-base双架构candidate
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build')
+    runs-on: ubuntu-24.04
+    needs:
+      - resolve-public
+      - resolve-claude
+      - registry-preflight
+    permissions:
+      contents: read
+    outputs:
+      image_name: ${{ steps.meta.outputs.image_name }}
+      candidate_tag: ${{ steps.meta.outputs.candidate_tag }}
+      digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 配置QEMU多架构支持
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: 配置Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: 登录GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PRIVATE_PUBLISH_TOKEN }}
+
+      - name: 生成candidate信息
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner_lc="$(tr '[:upper:]' '[:lower:]' <<< "$GITHUB_REPOSITORY_OWNER")"
+          echo "image_name=ghcr.io/${owner_lc}/${BASE_PACKAGE}" >> "$GITHUB_OUTPUT"
+          echo "candidate_tag=candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: 构建并推送personal-base candidate
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: private/Dockerfile
+          target: personal-base
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.candidate_tag }}
+          provenance: mode=min
+          sbom: true
+          build-args: |
+            PUBLIC_BASE_REF=${{ needs.resolve-public.outputs.base_ref }}
+            PUBLIC_REMOTE_REF=${{ needs.resolve-public.outputs.remote_ref }}
+            PUBLIC_RELEASE_SET=${{ needs.resolve-public.outputs.release_set }}
+            PERSONAL_RELEASE_SET=personal-${{ github.run_id }}-${{ github.run_attempt }}
+            CLAUDE_VERSION=${{ needs.resolve-claude.outputs.version }}
+            CLAUDE_COMMIT=${{ needs.resolve-claude.outputs.commit }}
+            CLAUDE_BUILD_DATE=${{ needs.resolve-claude.outputs.build_date }}
+            CLAUDE_MANIFEST_SHA256=${{ needs.resolve-claude.outputs.manifest_sha256 }}
+            CLAUDE_SHA256_AMD64=${{ needs.resolve-claude.outputs.sha256_amd64 }}
+            CLAUDE_SHA256_ARM64=${{ needs.resolve-claude.outputs.sha256_arm64 }}
+            CLAUDE_SIZE_AMD64=${{ needs.resolve-claude.outputs.size_amd64 }}
+            CLAUDE_SIZE_ARM64=${{ needs.resolve-claude.outputs.size_arm64 }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.codex-dev.build.repository=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=codex-dev-personal-base
+            org.opencontainers.image.description=基于公开Codex base并固定安装已验签Claude Code的个人私有镜像。
+            io.codex-dev.release-set=personal-${{ github.run_id }}-${{ github.run_attempt }}
+          cache-from: |
+            type=gha,scope=personal-base-amd64
+            type=gha,scope=personal-base-arm64
+            type=gha,scope=personal-base-publish
+          cache-to: type=gha,mode=max,scope=personal-base-publish
+
+  publish-remote:
+    name: 发布personal-remote双架构candidate
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build')
+    runs-on: ubuntu-24.04
+    needs:
+      - resolve-public
+      - resolve-claude
+      - registry-preflight
+    permissions:
+      contents: read
+    outputs:
+      image_name: ${{ steps.meta.outputs.image_name }}
+      candidate_tag: ${{ steps.meta.outputs.candidate_tag }}
+      digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 配置QEMU多架构支持
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: 配置Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: 登录GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PRIVATE_PUBLISH_TOKEN }}
+
+      - name: 生成candidate信息
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner_lc="$(tr '[:upper:]' '[:lower:]' <<< "$GITHUB_REPOSITORY_OWNER")"
+          echo "image_name=ghcr.io/${owner_lc}/${REMOTE_PACKAGE}" >> "$GITHUB_OUTPUT"
+          echo "candidate_tag=candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: 构建并推送personal-remote candidate
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: private/Dockerfile
+          target: personal-remote
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.candidate_tag }}
+          provenance: mode=min
+          sbom: true
+          build-args: |
+            PUBLIC_BASE_REF=${{ needs.resolve-public.outputs.base_ref }}
+            PUBLIC_REMOTE_REF=${{ needs.resolve-public.outputs.remote_ref }}
+            PUBLIC_RELEASE_SET=${{ needs.resolve-public.outputs.release_set }}
+            PERSONAL_RELEASE_SET=personal-${{ github.run_id }}-${{ github.run_attempt }}
+            CLAUDE_VERSION=${{ needs.resolve-claude.outputs.version }}
+            CLAUDE_COMMIT=${{ needs.resolve-claude.outputs.commit }}
+            CLAUDE_BUILD_DATE=${{ needs.resolve-claude.outputs.build_date }}
+            CLAUDE_MANIFEST_SHA256=${{ needs.resolve-claude.outputs.manifest_sha256 }}
+            CLAUDE_SHA256_AMD64=${{ needs.resolve-claude.outputs.sha256_amd64 }}
+            CLAUDE_SHA256_ARM64=${{ needs.resolve-claude.outputs.sha256_arm64 }}
+            CLAUDE_SIZE_AMD64=${{ needs.resolve-claude.outputs.size_amd64 }}
+            CLAUDE_SIZE_ARM64=${{ needs.resolve-claude.outputs.size_arm64 }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.codex-dev.build.repository=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=codex-dev-personal-remote
+            org.opencontainers.image.description=基于公开Codex remote并固定安装已验签Claude Code的个人私有SSH镜像。
+            io.codex-dev.release-set=personal-${{ github.run_id }}-${{ github.run_attempt }}
+          cache-from: |
+            type=gha,scope=personal-remote-amd64
+            type=gha,scope=personal-remote-arm64
+            type=gha,scope=personal-remote-publish
+          cache-to: type=gha,mode=max,scope=personal-remote-publish
+
+  post-push-visibility:
+    name: candidate推送后再次确认private
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build')
+    runs-on: ubuntu-24.04
+    needs:
+      - publish-base
+      - publish-remote
+
+    steps:
+      - name: 使用guard token复核两个package
+        env:
+          GHCR_PRIVATE_GUARD_TOKEN: ${{ secrets.GHCR_PRIVATE_GUARD_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$GHCR_PRIVATE_GUARD_TOKEN" ]; then
+            echo "缺少GHCR_PRIVATE_GUARD_TOKEN。" >&2
+            exit 1
+          fi
+          expected_owner="$(tr '[:upper:]' '[:lower:]' <<< "$GITHUB_REPOSITORY_OWNER")"
+          guard_login="$(curl --fail --silent --show-error --retry 3 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GHCR_PRIVATE_GUARD_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            'https://api.github.com/user' | jq -r '.login // empty' | tr '[:upper:]' '[:lower:]')"
+          if [ "$guard_login" != "$expected_owner" ]; then
+            echo "candidate推送后guard token owner复核失败。" >&2
+            exit 1
+          fi
+          for package in "$BASE_PACKAGE" "$REMOTE_PACKAGE"; do
+            response="$(curl --fail --silent --show-error --retry 3 \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer ${GHCR_PRIVATE_GUARD_TOKEN}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/user/packages/container/${package}")"
+            visibility="$(jq -r '.visibility // empty' <<< "$response")"
+            package_owner="$(jq -r '.owner.login // empty' <<< "$response" | tr '[:upper:]' '[:lower:]')"
+            linked_repository="$(jq -r '.repository.full_name // empty' <<< "$response")"
+            if { [ -n "$package_owner" ] && [ "$package_owner" != "$expected_owner" ]; } \
+              || [ "$visibility" != private ] || [ -n "$linked_repository" ]; then
+              echo "candidate推送后owner、visibility或repository关联复核失败：$package" >&2
+              exit 1
+            fi
+          done
+
+  registry-smoke:
+    name: 按candidate根digest验证双镜像 ${{ matrix.platform }}
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build')
+    runs-on: ubuntu-24.04
+    needs:
+      - resolve-public
+      - resolve-claude
+      - publish-base
+      - publish-remote
+      - post-push-visibility
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            name: amd64
+          - platform: linux/arm64
+            name: arm64
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 配置QEMU多架构支持
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: 登录GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PRIVATE_PUBLISH_TOKEN }}
+
+      - name: Smoke candidate根digest
+        env:
+          EXPECTED_CLAUDE_VERSION: ${{ needs.resolve-claude.outputs.version }}
+          EXPECTED_CLAUDE_SHA256: ${{ matrix.name == 'amd64' && needs.resolve-claude.outputs.sha256_amd64 || needs.resolve-claude.outputs.sha256_arm64 }}
+          BASE_REF: ${{ needs.publish-base.outputs.image_name }}@${{ needs.publish-base.outputs.digest }}
+          REMOTE_REF: ${{ needs.publish-remote.outputs.image_name }}@${{ needs.publish-remote.outputs.digest }}
+          CODEX_VERSION: ${{ needs.resolve-public.outputs.codex_version }}
+          MISE_VERSION: ${{ needs.resolve-public.outputs.mise_version }}
+          PLATFORM: ${{ matrix.platform }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/smoke-image.sh "$BASE_REF" "$CODEX_VERSION" "$PLATFORM" "$MISE_VERSION"
+          ./scripts/smoke-remote-ssh.sh "$REMOTE_REF" "$CODEX_VERSION" "$PLATFORM" "$MISE_VERSION" "$BASE_REF"
+
+  verify-candidate:
+    name: 验证root平台、attestations与关键labels
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build')
+    runs-on: ubuntu-24.04
+    needs:
+      - resolve-public
+      - resolve-claude
+      - publish-base
+      - publish-remote
+      - post-push-visibility
+    permissions:
+      contents: read
+
+    steps:
+      - name: 配置Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: 登录GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PRIVATE_PUBLISH_TOKEN }}
+
+      - name: 检查两个candidate
+        env:
+          BASE_IMAGE: ${{ needs.publish-base.outputs.image_name }}
+          BASE_DIGEST: ${{ needs.publish-base.outputs.digest }}
+          REMOTE_IMAGE: ${{ needs.publish-remote.outputs.image_name }}
+          REMOTE_DIGEST: ${{ needs.publish-remote.outputs.digest }}
+          PUBLIC_BASE_REF: ${{ needs.resolve-public.outputs.base_ref }}
+          PUBLIC_REMOTE_REF: ${{ needs.resolve-public.outputs.remote_ref }}
+          PUBLIC_RELEASE_SET: ${{ needs.resolve-public.outputs.release_set }}
+          PERSONAL_RELEASE_SET: personal-${{ github.run_id }}-${{ github.run_attempt }}
+          CODEX_VERSION: ${{ needs.resolve-public.outputs.codex_version }}
+          MISE_VERSION: ${{ needs.resolve-public.outputs.mise_version }}
+          CLAUDE_VERSION: ${{ needs.resolve-claude.outputs.version }}
+          CLAUDE_COMMIT: ${{ needs.resolve-claude.outputs.commit }}
+          CLAUDE_MANIFEST_SHA256: ${{ needs.resolve-claude.outputs.manifest_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p candidate-evidence
+
+          verify_image() {
+            local role="$1"
+            local image="$2"
+            local digest="$3"
+            local parent_key="$4"
+            local parent_ref="$5"
+            local exact_ref="${image}@${digest}"
+            local index="candidate-evidence/${role}-index.json"
+
+            if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "$role根digest无效：$digest" >&2
+              exit 1
+            fi
+            docker buildx imagetools inspect --raw "$exact_ref" > "$index"
+            jq -e '.mediaType == "application/vnd.oci.image.index.v1+json" or .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json"' "$index" >/dev/null
+            jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length == 1' "$index" >/dev/null
+            jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length == 1' "$index" >/dev/null
+            jq -e '[.manifests[] | select(.platform.os == "linux")] | length == 2' "$index" >/dev/null
+            jq -e '[.manifests[] | select(
+              (.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) or
+              (.platform.os == "unknown" and .platform.architecture == "unknown")
+            )] | length == (.manifests | length)' "$index" >/dev/null
+            jq -e '[.manifests[] | select(.platform.os == "unknown" and .platform.architecture == "unknown")] | length >= 2' "$index" >/dev/null
+
+            docker buildx imagetools inspect "$exact_ref" --format '{{json .Provenance}}' > "candidate-evidence/${role}-provenance.json"
+            docker buildx imagetools inspect "$exact_ref" --format '{{json .SBOM}}' > "candidate-evidence/${role}-sbom.json"
+            jq -e '. != null and . != {} and . != []' "candidate-evidence/${role}-provenance.json" >/dev/null
+            jq -e '. != null and . != {} and . != []' "candidate-evidence/${role}-sbom.json" >/dev/null
+
+            for arch in amd64 arm64; do
+              child="$(jq -r --arg arch "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' "$index")"
+              labels="candidate-evidence/${role}-${arch}-labels.json"
+              docker buildx imagetools inspect "${image}@${child}" --format '{{json .Image.Config.Labels}}' > "$labels"
+              jq -e \
+                --arg repository "https://github.com/${GITHUB_REPOSITORY}" \
+                --arg revision "$GITHUB_SHA" \
+                --arg role "$role" \
+                --arg parent_key "$parent_key" \
+                --arg parent_ref "$parent_ref" \
+                --arg public_release_set "$PUBLIC_RELEASE_SET" \
+                --arg personal_release_set "$PERSONAL_RELEASE_SET" \
+                --arg codex_version "$CODEX_VERSION" \
+                --arg mise_version "v${MISE_VERSION}" \
+                --arg claude_version "$CLAUDE_VERSION" \
+                --arg claude_commit "$CLAUDE_COMMIT" \
+                --arg claude_manifest "$CLAUDE_MANIFEST_SHA256" '
+                  (.["org.opencontainers.image.source"] // "") == "" and
+                  .["org.opencontainers.image.revision"] == $revision and
+                  .["io.codex-dev.build.repository"] == $repository and
+                  .["io.codex-dev.image.role"] == $role and
+                  .["io.codex-dev.image.flavor"] == "personal-dual-cli" and
+                  .[$parent_key] == $parent_ref and
+                  .["io.codex-dev.parent.release-set"] == $public_release_set and
+                  .["io.codex-dev.release-set"] == $personal_release_set and
+                  .["io.codex-dev.codex.version"] == $codex_version and
+                  .["io.codex-dev.mise.version"] == $mise_version and
+                  .["io.codex-dev.claude.version"] == $claude_version and
+                  .["io.codex-dev.claude.commit"] == $claude_commit and
+                  .["io.codex-dev.claude.manifest-sha256"] == $claude_manifest
+                ' "$labels" >/dev/null
+            done
+          }
+
+          verify_image base "$BASE_IMAGE" "$BASE_DIGEST" io.codex-dev.parent.base "$PUBLIC_BASE_REF"
+          verify_image remote "$REMOTE_IMAGE" "$REMOTE_DIGEST" io.codex-dev.parent.remote "$PUBLIC_REMOTE_REF"
+
+          {
+            echo "### Personal candidate supply-chain"
+            echo "- base: \`${BASE_IMAGE}@${BASE_DIGEST}\`"
+            echo "- remote: \`${REMOTE_IMAGE}@${REMOTE_DIGEST}\`"
+            echo "- 双平台root、provenance、SBOM和关键labels均已验证"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传candidate registry证据
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: personal-candidate-registry-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate-evidence
+          if-no-files-found: error
+          retention-days: 30
+
+  scan-candidate:
+    name: Trivy ${{ matrix.role }} ${{ matrix.platform }}
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build')
+    runs-on: ubuntu-24.04
+    needs:
+      - publish-base
+      - publish-remote
+      - post-push-visibility
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - role: base
+            platform: linux/amd64
+            name: amd64
+          - role: base
+            platform: linux/arm64
+            name: arm64
+          - role: remote
+            platform: linux/amd64
+            name: amd64
+          - role: remote
+            platform: linux/arm64
+            name: arm64
+
+    steps:
+      - name: 安装固定版本Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: false
+
+      - name: 验证Trivy版本
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_version="$(trivy --version | awk '/^Version:/ {print $2; exit}')"
+          if [ "v${actual_version}" != "$TRIVY_VERSION" ]; then
+            echo "Trivy版本不匹配：期望$TRIVY_VERSION，实际v${actual_version}" >&2
+            exit 1
+          fi
+
+      - name: 登录GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PRIVATE_PUBLISH_TOKEN }}
+
+      - name: 生成报告并执行角色门禁
+        env:
+          ROLE: ${{ matrix.role }}
+          PLATFORM: ${{ matrix.platform }}
+          PLATFORM_NAME: ${{ matrix.name }}
+          BASE_REF: ${{ needs.publish-base.outputs.image_name }}@${{ needs.publish-base.outputs.digest }}
+          REMOTE_REF: ${{ needs.publish-remote.outputs.image_name }}@${{ needs.publish-remote.outputs.digest }}
+          TRIVY_USERNAME: ${{ github.repository_owner }}
+          TRIVY_PASSWORD: ${{ secrets.GHCR_PRIVATE_PUBLISH_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$ROLE" = base ]; then
+            image_ref="$BASE_REF"
+          else
+            image_ref="$REMOTE_REF"
+          fi
+          report="trivy-personal-${ROLE}-${PLATFORM_NAME}"
+
+          trivy image --image-src remote --platform "$PLATFORM" --scanners vuln \
+            --severity HIGH,CRITICAL --exit-code 0 --timeout 15m \
+            --format json --output "${report}.json" "$image_ref"
+          trivy image --image-src remote --platform "$PLATFORM" --scanners vuln \
+            --severity HIGH,CRITICAL --exit-code 0 --timeout 15m \
+            --format table --output "${report}.txt" "$image_ref"
+          trivy image --image-src remote --platform "$PLATFORM" --scanners vuln \
+            --severity HIGH,CRITICAL --exit-code 0 --timeout 15m \
+            --format sarif --output "${report}.sarif" "$image_ref"
+
+          high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "${report}.json")"
+          critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "${report}.json")"
+          fixed_critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" and (.FixedVersion // "") != "")] | length' "${report}.json")"
+
+          {
+            echo "### Trivy personal $ROLE $PLATFORM"
+            echo "- Image: \`$image_ref\`"
+            echo "- HIGH: $high"
+            echo "- CRITICAL: $critical"
+            echo "- CRITICAL with fix: $fixed_critical"
+            if [ "$ROLE" = base ]; then
+              echo "- Gate: 基线报告，不按漏洞数量阻断"
+            else
+              echo "- Gate: 已有修复版本的CRITICAL阻断"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$ROLE" = remote ] && [ "$fixed_critical" -gt 0 ]; then
+            echo "personal-remote存在$fixed_critical个已有修复版本的CRITICAL漏洞。" >&2
+            exit 1
+          fi
+
+      - name: 上传Trivy报告
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-personal-${{ matrix.role }}-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: trivy-personal-${{ matrix.role }}-${{ matrix.name }}.*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传SARIF到Code Scanning
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          sarif_file: trivy-personal-${{ matrix.role }}-${{ matrix.name }}.sarif
+          category: trivy-personal-${{ matrix.role }}-${{ matrix.name }}
+
+  promote:
+    name: 复核上游并提升两个personal candidate
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'build' && inputs.promote)
+    runs-on: ubuntu-24.04
+    needs:
+      - static
+      - resolve-public
+      - resolve-claude
+      - publish-base
+      - publish-remote
+      - post-push-visibility
+      - registry-smoke
+      - verify-candidate
+      - scan-candidate
+    permissions:
+      contents: read
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 配置Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: 登录GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PRIVATE_PUBLISH_TOKEN }}
+
+      - name: 重新解析公开父镜像并比较
+        env:
+          EXPECTED_BASE_DIGEST: ${{ needs.resolve-public.outputs.base_digest }}
+          EXPECTED_REMOTE_DIGEST: ${{ needs.resolve-public.outputs.remote_digest }}
+          EXPECTED_RELEASE_SET: ${{ needs.resolve-public.outputs.release_set }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_outputs="$RUNNER_TEMP/current-public.outputs"
+          : > "$current_outputs"
+          GITHUB_OUTPUT="$current_outputs" ./scripts/resolve-public-release-pair.sh >/dev/null
+          current_base_digest="$(awk -F= '$1 == "base_digest" {print $2; exit}' "$current_outputs")"
+          current_remote_digest="$(awk -F= '$1 == "remote_digest" {print $2; exit}' "$current_outputs")"
+          current_release_set="$(awk -F= '$1 == "release_set" {print $2; exit}' "$current_outputs")"
+          if [ "$current_base_digest" != "$EXPECTED_BASE_DIGEST" ] \
+            || [ "$current_remote_digest" != "$EXPECTED_REMOTE_DIGEST" ] \
+            || [ "$current_release_set" != "$EXPECTED_RELEASE_SET" ]; then
+            echo "公开父镜像latest对在构建期间发生变化，停止promotion。" >&2
+            exit 1
+          fi
+
+      - name: 重新解析验签Claude latest并比较
+        env:
+          EXPECTED_VERSION: ${{ needs.resolve-claude.outputs.version }}
+          EXPECTED_COMMIT: ${{ needs.resolve-claude.outputs.commit }}
+          EXPECTED_BUILD_DATE: ${{ needs.resolve-claude.outputs.build_date }}
+          EXPECTED_MANIFEST: ${{ needs.resolve-claude.outputs.manifest_sha256 }}
+          EXPECTED_AMD64: ${{ needs.resolve-claude.outputs.sha256_amd64 }}
+          EXPECTED_ARM64: ${{ needs.resolve-claude.outputs.sha256_arm64 }}
+          AUDIT_EVIDENCE_DIR: ${{ runner.temp }}/claude-promotion-recheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_outputs="$RUNNER_TEMP/current-claude.outputs"
+          : > "$current_outputs"
+          GITHUB_OUTPUT="$current_outputs" ./scripts/audit-claude-private-supply-chain.sh --resolve-only >/dev/null
+          current_version="$(awk -F= '$1 == "version" {print $2; exit}' "$current_outputs")"
+          current_commit="$(awk -F= '$1 == "commit" {print $2; exit}' "$current_outputs")"
+          current_build_date="$(awk -F= '$1 == "build_date" {print $2; exit}' "$current_outputs")"
+          current_manifest="$(awk -F= '$1 == "manifest_sha256" {print $2; exit}' "$current_outputs")"
+          current_amd64="$(awk -F= '$1 == "sha256_amd64" {print $2; exit}' "$current_outputs")"
+          current_arm64="$(awk -F= '$1 == "sha256_arm64" {print $2; exit}' "$current_outputs")"
+          if [ "$current_version" != "$EXPECTED_VERSION" ] \
+            || [ "$current_commit" != "$EXPECTED_COMMIT" ] \
+            || [ "$current_build_date" != "$EXPECTED_BUILD_DATE" ] \
+            || [ "$current_manifest" != "$EXPECTED_MANIFEST" ] \
+            || [ "$current_amd64" != "$EXPECTED_AMD64" ] \
+            || [ "$current_arm64" != "$EXPECTED_ARM64" ]; then
+            echo "Claude latest或exact manifest在构建期间发生变化，停止promotion。" >&2
+            exit 1
+          fi
+
+      - name: promotion前再次确认private
+        env:
+          GHCR_PRIVATE_GUARD_TOKEN: ${{ secrets.GHCR_PRIVATE_GUARD_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$GHCR_PRIVATE_GUARD_TOKEN" ]; then
+            echo "缺少GHCR_PRIVATE_GUARD_TOKEN。" >&2
+            exit 1
+          fi
+          expected_owner="$(tr '[:upper:]' '[:lower:]' <<< "$GITHUB_REPOSITORY_OWNER")"
+          guard_login="$(curl --fail --silent --show-error --retry 3 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GHCR_PRIVATE_GUARD_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            'https://api.github.com/user' | jq -r '.login // empty' | tr '[:upper:]' '[:lower:]')"
+          if [ "$guard_login" != "$expected_owner" ]; then
+            echo "promotion前guard token owner复核失败。" >&2
+            exit 1
+          fi
+          for package in "$BASE_PACKAGE" "$REMOTE_PACKAGE"; do
+            response="$(curl --fail --silent --show-error --retry 3 \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer ${GHCR_PRIVATE_GUARD_TOKEN}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/user/packages/container/${package}")"
+            visibility="$(jq -r '.visibility // empty' <<< "$response")"
+            package_owner="$(jq -r '.owner.login // empty' <<< "$response" | tr '[:upper:]' '[:lower:]')"
+            linked_repository="$(jq -r '.repository.full_name // empty' <<< "$response")"
+            if { [ -n "$package_owner" ] && [ "$package_owner" != "$expected_owner" ]; } \
+              || [ "$visibility" != private ] || [ -n "$linked_repository" ]; then
+              echo "promotion前owner、visibility或repository关联复核失败：$package" >&2
+              exit 1
+            fi
+          done
+
+      - name: 从candidate digest创建正式标签并重试复核
+        env:
+          BASE_IMAGE: ${{ needs.publish-base.outputs.image_name }}
+          BASE_DIGEST: ${{ needs.publish-base.outputs.digest }}
+          REMOTE_IMAGE: ${{ needs.publish-remote.outputs.image_name }}
+          REMOTE_DIGEST: ${{ needs.publish-remote.outputs.digest }}
+          RELEASE_DATE: ${{ needs.static.outputs.release_date }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          date_tag="$RELEASE_DATE"
+          short_sha="${GITHUB_SHA::7}"
+
+          inspect_digest_with_retry() {
+            local tag="$1"
+            local expected="$2"
+            local attempt output actual
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if output="$(docker buildx imagetools inspect "$tag" 2>&1)"; then
+                actual="$(awk '$1 == "Digest:" {print $2; exit}' <<< "$output")"
+                if [ "$actual" = "$expected" ]; then
+                  return 0
+                fi
+              fi
+              if [ "$attempt" -lt 10 ]; then
+                sleep 3
+              fi
+            done
+            printf '%s\n' "${output:-}" >&2
+            echo "正式标签digest不匹配：$tag" >&2
+            return 1
+          }
+
+          verify_promoted() {
+            local role="$1"
+            local image="$2"
+            local digest="$3"
+            local source="${image}@${digest}"
+            local tags=("${image}:latest" "${image}:${date_tag}" "${image}:${short_sha}")
+            local args=()
+            local tag
+            for tag in "${tags[@]}"; do
+              args+=(--tag "$tag")
+            done
+            docker buildx imagetools create "${args[@]}" "$source"
+            for tag in "${tags[@]}"; do
+              inspect_digest_with_retry "$tag" "$digest"
+            done
+
+            docker buildx imagetools inspect --raw "${tags[0]}" > "${role}-promoted-index.json"
+            jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length == 1' "${role}-promoted-index.json" >/dev/null
+            jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length == 1' "${role}-promoted-index.json" >/dev/null
+            docker buildx imagetools inspect "${tags[0]}" --format '{{json .Provenance}}' > "${role}-promoted-provenance.json"
+            docker buildx imagetools inspect "${tags[0]}" --format '{{json .SBOM}}' > "${role}-promoted-sbom.json"
+            jq -e '. != null and . != {} and . != []' "${role}-promoted-provenance.json" >/dev/null
+            jq -e '. != null and . != {} and . != []' "${role}-promoted-sbom.json" >/dev/null
+
+            {
+              echo "### 已提升$role"
+              echo "- Source: \`$source\`"
+              for tag in "${tags[@]}"; do
+                echo "- \`$tag\`"
+              done
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          verify_promoted base "$BASE_IMAGE" "$BASE_DIGEST"
+          verify_promoted remote "$REMOTE_IMAGE" "$REMOTE_DIGEST"
+
+  release-evidence:
+    name: 生成私有发布证据
+    if: >-
+      always() &&
+      (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build')) &&
+      needs.publish-base.result == 'success' &&
+      needs.publish-remote.result == 'success'
+    runs-on: ubuntu-24.04
+    needs:
+      - static
+      - resolve-public
+      - resolve-claude
+      - publish-base
+      - publish-remote
+      - post-push-visibility
+      - registry-smoke
+      - verify-candidate
+      - scan-candidate
+      - promote
+
+    steps:
+      - name: 配置Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: 登录GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PRIVATE_PUBLISH_TOKEN }}
+
+      - name: 查询两个package的实际promotion状态
+        id: promotion-state
+        env:
+          BASE_IMAGE: ${{ needs.publish-base.outputs.image_name }}
+          BASE_DIGEST: ${{ needs.publish-base.outputs.digest }}
+          REMOTE_IMAGE: ${{ needs.publish-remote.outputs.image_name }}
+          REMOTE_DIGEST: ${{ needs.publish-remote.outputs.digest }}
+          RELEASE_DATE: ${{ needs.static.outputs.release_date }}
+          PROMOTION_RESULT: ${{ needs.promote.result }}
+          PROMOTION_REQUESTED: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.promote) }}
+          POST_PUSH_VISIBILITY_RESULT: ${{ needs.post-push-visibility.result }}
+          REGISTRY_SMOKE_RESULT: ${{ needs.registry-smoke.result }}
+          VERIFY_CANDIDATE_RESULT: ${{ needs.verify-candidate.result }}
+          SCAN_CANDIDATE_RESULT: ${{ needs.scan-candidate.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$PROMOTION_RESULT" = skipped ]; then
+            blocked_by=""
+            if [ "$PROMOTION_REQUESTED" = true ]; then
+              state=blocked
+              for gate in \
+                "post-push-visibility:${POST_PUSH_VISIBILITY_RESULT}" \
+                "registry-smoke:${REGISTRY_SMOKE_RESULT}" \
+                "verify-candidate:${VERIFY_CANDIDATE_RESULT}" \
+                "scan-candidate:${SCAN_CANDIDATE_RESULT}"; do
+                if [ "${gate##*:}" != success ]; then
+                  if [ -n "$blocked_by" ]; then
+                    blocked_by="${blocked_by},${gate}"
+                  else
+                    blocked_by="$gate"
+                  fi
+                fi
+              done
+              if [ -z "$blocked_by" ]; then
+                blocked_by="promotion-job:skipped"
+              fi
+            else
+              state=not-requested
+            fi
+            echo "base_state=$state" >> "$GITHUB_OUTPUT"
+            echo "remote_state=$state" >> "$GITHUB_OUTPUT"
+            echo "overall_state=$state" >> "$GITHUB_OUTPUT"
+            echo "blocked_by=$blocked_by" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          date_tag="$RELEASE_DATE"
+          short_sha="${GITHUB_SHA::7}"
+
+          inspect_digest() {
+            local tag="$1"
+            local attempt output digest=""
+            for attempt in 1 2 3 4 5; do
+              if output="$(docker buildx imagetools inspect "$tag" 2>/dev/null)"; then
+                digest="$(awk '$1 == "Digest:" {print $2; exit}' <<< "$output")"
+                if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  break
+                fi
+              fi
+              sleep 2
+            done
+            printf '%s\n' "$digest"
+          }
+
+          role_state() {
+            local image="$1"
+            local expected="$2"
+            local matched=0
+            local observed=0
+            local tag actual
+            for tag in "${image}:latest" "${image}:${date_tag}" "${image}:${short_sha}"; do
+              actual="$(inspect_digest "$tag")"
+              if [ -n "$actual" ]; then
+                observed=$((observed + 1))
+              fi
+              if [ "$actual" = "$expected" ]; then
+                matched=$((matched + 1))
+              fi
+            done
+
+            if [ "$matched" -eq 3 ]; then
+              printf 'promoted\n'
+            elif [ "$matched" -gt 0 ]; then
+              printf 'partial\n'
+            elif [ "$observed" -eq 3 ]; then
+              printf 'unchanged\n'
+            else
+              printf 'unknown\n'
+            fi
+          }
+
+          base_state="$(role_state "$BASE_IMAGE" "$BASE_DIGEST")"
+          remote_state="$(role_state "$REMOTE_IMAGE" "$REMOTE_DIGEST")"
+          if [ "$base_state" = promoted ] && [ "$remote_state" = promoted ]; then
+            overall_state=promoted
+          elif [ "$base_state" = unchanged ] && [ "$remote_state" = unchanged ]; then
+            overall_state=unchanged
+          elif [ "$base_state" = unknown ] || [ "$remote_state" = unknown ]; then
+            overall_state=unknown
+          else
+            overall_state=partial
+          fi
+
+          echo "base_state=$base_state" >> "$GITHUB_OUTPUT"
+          echo "remote_state=$remote_state" >> "$GITHUB_OUTPUT"
+          echo "overall_state=$overall_state" >> "$GITHUB_OUTPUT"
+          echo "blocked_by=" >> "$GITHUB_OUTPUT"
+
+      - name: 写入JSON与Markdown证据
+        env:
+          BASE_IMAGE: ${{ needs.publish-base.outputs.image_name }}
+          BASE_DIGEST: ${{ needs.publish-base.outputs.digest }}
+          REMOTE_IMAGE: ${{ needs.publish-remote.outputs.image_name }}
+          REMOTE_DIGEST: ${{ needs.publish-remote.outputs.digest }}
+          CANDIDATE_TAG: ${{ needs.publish-base.outputs.candidate_tag }}
+          PUBLIC_BASE_REF: ${{ needs.resolve-public.outputs.base_ref }}
+          PUBLIC_REMOTE_REF: ${{ needs.resolve-public.outputs.remote_ref }}
+          PUBLIC_RELEASE_SET: ${{ needs.resolve-public.outputs.release_set }}
+          PUBLIC_REVISION: ${{ needs.resolve-public.outputs.revision }}
+          CODEX_RELEASE_ID: ${{ needs.resolve-public.outputs.codex_release_id }}
+          CODEX_RELEASE_TAG: ${{ needs.resolve-public.outputs.codex_release_tag }}
+          CODEX_VERSION: ${{ needs.resolve-public.outputs.codex_version }}
+          MISE_VERSION: ${{ needs.resolve-public.outputs.mise_version }}
+          CLAUDE_VERSION: ${{ needs.resolve-claude.outputs.version }}
+          CLAUDE_COMMIT: ${{ needs.resolve-claude.outputs.commit }}
+          CLAUDE_BUILD_DATE: ${{ needs.resolve-claude.outputs.build_date }}
+          CLAUDE_MANIFEST_SHA256: ${{ needs.resolve-claude.outputs.manifest_sha256 }}
+          CLAUDE_SHA256_AMD64: ${{ needs.resolve-claude.outputs.sha256_amd64 }}
+          CLAUDE_SHA256_ARM64: ${{ needs.resolve-claude.outputs.sha256_arm64 }}
+          RELEASE_DATE: ${{ needs.static.outputs.release_date }}
+          BASE_PROMOTION_STATE: ${{ steps.promotion-state.outputs.base_state }}
+          REMOTE_PROMOTION_STATE: ${{ steps.promotion-state.outputs.remote_state }}
+          OVERALL_PROMOTION_STATE: ${{ steps.promotion-state.outputs.overall_state }}
+          PROMOTION_BLOCKED_BY: ${{ steps.promotion-state.outputs.blocked_by }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-evidence
+          run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          promoted=false
+          if [ "$OVERALL_PROMOTION_STATE" = promoted ]; then
+            promoted=true
+          fi
+
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit "$GITHUB_SHA" \
+            --arg run_url "$run_url" \
+            --arg candidate_tag "$CANDIDATE_TAG" \
+            --arg release_date "$RELEASE_DATE" \
+            --arg personal_release_set "personal-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --arg base_image "$BASE_IMAGE" \
+            --arg base_digest "$BASE_DIGEST" \
+            --arg remote_image "$REMOTE_IMAGE" \
+            --arg remote_digest "$REMOTE_DIGEST" \
+            --arg public_base_ref "$PUBLIC_BASE_REF" \
+            --arg public_remote_ref "$PUBLIC_REMOTE_REF" \
+            --arg public_release_set "$PUBLIC_RELEASE_SET" \
+            --arg public_revision "$PUBLIC_REVISION" \
+            --arg codex_release_id "$CODEX_RELEASE_ID" \
+            --arg codex_release_tag "$CODEX_RELEASE_TAG" \
+            --arg codex_version "$CODEX_VERSION" \
+            --arg mise_version "$MISE_VERSION" \
+            --arg claude_version "$CLAUDE_VERSION" \
+            --arg claude_commit "$CLAUDE_COMMIT" \
+            --arg claude_build_date "$CLAUDE_BUILD_DATE" \
+            --arg claude_manifest_sha256 "$CLAUDE_MANIFEST_SHA256" \
+            --arg claude_sha256_amd64 "$CLAUDE_SHA256_AMD64" \
+            --arg claude_sha256_arm64 "$CLAUDE_SHA256_ARM64" \
+            --arg base_promotion_state "$BASE_PROMOTION_STATE" \
+            --arg remote_promotion_state "$REMOTE_PROMOTION_STATE" \
+            --arg overall_promotion_state "$OVERALL_PROMOTION_STATE" \
+            --arg promotion_blocked_by "$PROMOTION_BLOCKED_BY" \
+            --argjson promoted "$promoted" '
+              {
+                repository: $repository,
+                commit: $commit,
+                run_url: $run_url,
+                candidate_tag: $candidate_tag,
+                release_date: $release_date,
+                personal_release_set: $personal_release_set,
+                promoted: $promoted,
+                promotion: {
+                  overall: $overall_promotion_state,
+                  base: $base_promotion_state,
+                  remote: $remote_promotion_state,
+                  blocked_by: $promotion_blocked_by
+                },
+                images: {
+                  base: {name: $base_image, digest: $base_digest},
+                  remote: {name: $remote_image, digest: $remote_digest}
+                },
+                public_parents: {
+                  base_ref: $public_base_ref,
+                  remote_ref: $public_remote_ref,
+                  release_set: $public_release_set,
+                  revision: $public_revision
+                },
+                codex: {
+                  release_id: $codex_release_id,
+                  release_tag: $codex_release_tag,
+                  version: $codex_version
+                },
+                mise: {version: $mise_version},
+                claude: {
+                  version: $claude_version,
+                  commit: $claude_commit,
+                  build_date: $claude_build_date,
+                  manifest_sha256: $claude_manifest_sha256,
+                  sha256_amd64: $claude_sha256_amd64,
+                  sha256_arm64: $claude_sha256_arm64,
+                  signing_fingerprint: "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
+                }
+              }
+            ' > release-evidence/release.json
+
+          {
+            echo "# Personal release evidence"
+            echo
+            echo "- Run: $run_url"
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- Candidate: \`$CANDIDATE_TAG\`"
+            echo "- Release date: \`$RELEASE_DATE\`"
+            echo "- Promoted: \`$promoted\`"
+            echo "- Promotion state: overall=\`$OVERALL_PROMOTION_STATE\`, base=\`$BASE_PROMOTION_STATE\`, remote=\`$REMOTE_PROMOTION_STATE\`"
+            if [ -n "$PROMOTION_BLOCKED_BY" ]; then
+              echo "- Promotion blocked by: \`$PROMOTION_BLOCKED_BY\`"
+            fi
+            echo "- Base: \`${BASE_IMAGE}@${BASE_DIGEST}\`"
+            echo "- Remote: \`${REMOTE_IMAGE}@${REMOTE_DIGEST}\`"
+            echo "- Public release set: \`$PUBLIC_RELEASE_SET\`"
+            echo "- Public parents: \`$PUBLIC_BASE_REF\`, \`$PUBLIC_REMOTE_REF\`"
+            echo "- Codex: \`$CODEX_VERSION\` (\`$CODEX_RELEASE_TAG\`, release \`$CODEX_RELEASE_ID\`)"
+            echo "- mise: \`$MISE_VERSION\`"
+            echo "- Claude Code: \`$CLAUDE_VERSION\` (commit \`$CLAUDE_COMMIT\`)"
+            echo "- Claude manifest SHA-256: \`$CLAUDE_MANIFEST_SHA256\`"
+          } | tee release-evidence/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传私有发布证据
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: personal-release-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-evidence
+          if-no-files-found: error
+          retention-days: 90

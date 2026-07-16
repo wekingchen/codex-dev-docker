@@ -63,6 +63,10 @@
 - 安装第三方工具不得执行未经校验的浮动远程 shell 脚本。
 - mise 必须固定官方 release，并分别校验 amd64、arm64 asset 的 SHA-256；两个架构必须在同一提交中更新。
 - Codex CLI 是明确例外：必须继续动态解析 `openai/codex` 官方 latest，并通过官方 installer 安装，不得在仓库中静态固定版本。
+- Claude Code只能进入owner本人使用的独立private GHCR package；公开base/remote package、Compose默认值和Portainer模板不得包含Claude二进制或指向private package。
+- Claude Code必须解析官方精确版本，固定release key指纹，验证`manifest.json.sig`与平台checksum/size；禁止执行浮动bootstrap或`curl | sh`。
+- GHCR visibility是package级而不是tag级；personal package必须用owner PAT发布、不得使用公开仓库`GITHUB_TOKEN`、不得关联或继承repository权限，并在candidate push前后和promotion前自动确认private且repository为空。GitHub API不能完整枚举显式用户与Actions ACL，owner还必须人工保持Manage access和Manage Actions access为空，不得把自动门禁描述为完整owner-only证明。
+- 镜像不得包含Claude登录态、API key、OAuth token或固定model；容器内更新必须关闭，由private镜像发布链管理版本。
 - provenance、SBOM 和漏洞扫描必须针对最终 registry candidate 根 digest，并在 promotion 前完成。
 - 未确认 OCI referrer 可达关系前，GHCR cleanup 必须继续保护所有 untagged versions。
 

@@ -4,7 +4,7 @@
 
 > 如果 Portainer Endpoint 使用 Docker Swarm，请不要直接套用本文。Swarm routing mesh、`depends_on` 和 loopback 端口发布语义不同，需要单独设计。
 
-仓库同时提供可直接粘贴到 Portainer 的模板：[`templates/portainer-stack.yaml`](../templates/portainer-stack.yaml)。
+仓库同时提供可直接粘贴到 Portainer 的公开Codex-only模板：[`templates/portainer-stack.yaml`](../templates/portainer-stack.yaml)。个人私有Codex + Claude Code镜像的GHCR认证、bootstrap与替换方法见 [`PERSONAL-DUAL-CLI.md`](PERSONAL-DUAL-CLI.md)。
 
 ## 1. 最终架构
 
@@ -50,6 +50,22 @@ ghcr.io/wekingchen/codex-dev-remote:latest
 ### `codex-dev-base`
 
 `codex-dev-base` 用于本地 `docker compose run`、`run.sh`、SSH Agent转发或派生开发镜像。如果这台 Portainer 宿主机只运行远程方案，可以不保留或运行 base 镜像。
+
+### 个人私有 dual-CLI 镜像
+
+如果本人需要在同一远程容器中任选 `codex` 或 `claude`，不要修改仓库公开模板。先在Portainer Registries中添加带 `read:packages` 权限的GHCR凭据，然后复制Stack并把两个服务的image同时替换为：
+
+```text
+ghcr.io/wekingchen/codex-dev-personal-remote:latest
+```
+
+或更稳妥的已验证根digest：
+
+```text
+ghcr.io/wekingchen/codex-dev-personal-remote@sha256:<remote-root-digest>
+```
+
+host-key-init与主服务必须使用同一个引用。其他端口、bind mounts、authorized keys、host keys和安全配置保持本文原样。PAT只保存在Portainer registry credential中，不写入Stack YAML；Claude登录在容器内完成并保存在 `/root/codex/dev-home`。
 
 ### `codex-ssh-hostkey-init`
 
@@ -486,6 +502,12 @@ mise --version
 sudo -n true
 ```
 
+如果Stack使用personal双CLI镜像，再执行：
+
+```bash
+claude --version
+```
+
 预期：
 
 ```text
@@ -581,6 +603,8 @@ docker pull ghcr.io/wekingchen/codex-dev-remote:latest
 
 再回到 Portainer 重新部署。单纯点击 `Restart` 不会切换到新镜像。
 
+personal双CLI Stack使用相同流程，但镜像名应为 `codex-dev-personal-remote`，并先确认最新private workflow已成功。Portainer必须继续使用已配置的GHCR private registry credential。
+
 ### 12.3 更新后验证
 
 ```bash
@@ -589,6 +613,8 @@ docker inspect codex-ssh \
 
 docker exec --user dev codex-ssh codex --version
 docker exec --user dev codex-ssh mise --version
+# personal双CLI Stack另外执行：
+docker exec --user dev codex-ssh claude --version
 ```
 
 更新不会删除：

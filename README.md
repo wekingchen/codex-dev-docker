@@ -60,6 +60,28 @@ GitHub Actions 在每次构建时从 `openai/codex` 官方 `releases/latest` API
 
 Dependabot继续更新 GitHub Actions 和 Docker tag；同 tag Ubuntu digest、mise 和 Trivy binary的漂移由审计 workflow提醒后人工更新，并重新通过完整双架构 candidate流程。
 
+## 个人私有 Codex + Claude Code 双 CLI
+
+公开 `codex-dev-base`、`codex-dev-remote` 和 Portainer模板继续保持Codex-only。仓库另提供仅供owner本人使用的私有派生流程：
+
+```text
+ghcr.io/wekingchen/codex-dev-personal-base
+ghcr.io/wekingchen/codex-dev-personal-remote
+```
+
+私有镜像从配对的公开不可变digest派生，并通过固定Anthropic release key指纹、detached manifest signature、双架构checksum和size验证Claude Code native binary。private package使用owner PAT而不是公开仓库`GITHUB_TOKEN`发布，并在candidate push前后和promotion前fail closed确认visibility为private且未关联repository。
+
+本地覆盖私有镜像后，可以使用：
+
+```bash
+./scripts/run.sh codex
+./scripts/run.sh claude
+```
+
+同一个 `/home/dev` 会分别持久化 `.codex`、`.claude` 和 `.claude.json`。完整的一次性GHCR bootstrap、GitHub Secrets、Portainer认证、升级与回滚说明见：[`docs/PERSONAL-DUAL-CLI.md`](docs/PERSONAL-DUAL-CLI.md)。
+
+> Claude Code是专有软件。该流程限定private、仅本人自用；自动门禁能验证private且未关联repository，但显式用户/Actions ACL仍需owner人工保持为空。不要向第三方分发镜像或共享Claude认证。
+
 ## 配置
 
 本地配置不受 Git 跟踪。首次使用可以复制示例：
@@ -93,6 +115,14 @@ CODEX_DEV_PULL_POLICY=missing
 ```bash
 mkdir -p workspace
 ./scripts/run.sh
+```
+
+`run.sh` 无参数时保持进入Bash；也会把参数原样传给容器，因此在personal双CLI镜像中可以直接运行：
+
+```bash
+./scripts/run.sh codex
+./scripts/run.sh claude
+./scripts/run.sh bash -lc 'codex --version && claude --version'
 ```
 
 也可以直接使用 Compose：
@@ -234,7 +264,7 @@ HOME_VOLUME=<旧-volume-名称>
 
 ## 重置 home volume
 
-以下操作会删除 Codex 登录状态、mise runtime、Git 配置和缓存：
+以下操作会删除 Codex 登录状态、mise runtime、Git 配置和缓存；如果使用personal双CLI镜像，也会同时删除Claude Code的 `.claude`、`.claude.json` 和登录状态：
 
 ```bash
 ./scripts/reset-home-volume.sh codex-dev-home
@@ -310,6 +340,7 @@ git push origin v0.1.0
 ./scripts/check-hardcoded.sh
 ./scripts/check-secrets.sh
 ./scripts/audit-supply-chain.sh
+./scripts/audit-claude-private-supply-chain.sh
 bash -n scripts/*.sh
 shellcheck scripts/*.sh
 docker compose -f compose.yaml -f compose.remote.yaml --profile remote config

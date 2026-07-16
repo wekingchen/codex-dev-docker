@@ -12,9 +12,14 @@ FILES_TO_CHECK=(
   "compose.remote.yaml"
   ".env.example"
   ".github/workflows/docker.yml"
+  ".github/workflows/docker-personal.yml"
   ".github/workflows/cleanup-ghcr.yml"
+  ".github/workflows/cleanup-personal-ghcr.yml"
   ".github/workflows/supply-chain-audit.yml"
+  ".github/workflows/supply-chain-audit-personal.yml"
   "scripts/audit-supply-chain.sh"
+  "scripts/audit-claude-private-supply-chain.sh"
+  "scripts/resolve-public-release-pair.sh"
   "scripts/run.sh"
   "scripts/run-with-ssh-agent.sh"
   "scripts/pull-latest.sh"
@@ -31,6 +36,8 @@ FILES_TO_CHECK=(
   "remote/sshd_config"
   "templates/portainer-stack.yaml"
   "base/Dockerfile"
+  "private/Dockerfile"
+  "private/visibility-probe.Dockerfile"
 )
 
 found=false
