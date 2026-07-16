@@ -242,7 +242,7 @@ check_visibility_probe() {
 }
 
 check_public_defaults() {
-  local file
+  local file remote_sshd_config expected_setenv setenv_count
   local public_defaults=(
     ".env.example"
     "compose.yaml"
@@ -263,7 +263,23 @@ check_public_defaults() {
     exit 1
   fi
 
-  report_ok "公开默认配置与base/Dockerfile未引入私有package或Claude"
+  remote_sshd_config="${REPO_ROOT}/remote/sshd_config"
+  expected_setenv='SetEnv CODEX_HOME=__DEV_HOME__/.codex MISE_DATA_DIR=__DEV_HOME__/.local/share/mise MISE_CONFIG_DIR=__DEV_HOME__/.config/mise'
+  setenv_count="$(grep -Ec '^SetEnv[[:space:]]+' "$remote_sshd_config" || true)"
+  if [ "$setenv_count" -ne 1 ]; then
+    echo "公开remote sshd模板必须且只能包含一条SetEnv，实际${setenv_count}条。" >&2
+    exit 1
+  fi
+  if ! grep -Fqx "$expected_setenv" "$remote_sshd_config"; then
+    echo "公开remote sshd模板的唯一SetEnv未完整设置Codex与mise状态目录。" >&2
+    exit 1
+  fi
+  if grep -Eiq 'DISABLE_AUTOUPDATER|DISABLE_UPDATES|claude([[:space:]_-]*code)?' "$remote_sshd_config"; then
+    echo "公开remote sshd模板不得包含Claude或私有更新禁用变量。" >&2
+    exit 1
+  fi
+
+  report_ok "公开默认配置、base/Dockerfile与remote sshd模板未引入私有package或Claude"
 }
 
 resolve_and_verify_claude() {

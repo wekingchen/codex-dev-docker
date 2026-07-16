@@ -121,6 +121,8 @@ test "$(id -u)" -eq "$EXPECTED_UID"
 test "$(id -g)" -eq "$EXPECTED_GID"
 test "$HOME" = "$EXPECTED_HOME"
 test "$CODEX_HOME" = "$EXPECTED_HOME/.codex"
+test "$MISE_DATA_DIR" = "$EXPECTED_HOME/.local/share/mise"
+test "$MISE_CONFIG_DIR" = "$EXPECTED_HOME/.config/mise"
 test -w "$HOME"
 test -w /workspace
 touch /workspace/.remote-smoke-write
@@ -229,11 +231,34 @@ if ssh -p "$SSH_PORT" \
   exit 1
 fi
 
-docker exec "$CONTAINER_NAME" bash -lc '
+docker exec \
+  --env "EXPECTED_HOME=$REMOTE_HOME" \
+  --env "SMOKE_EXPECT_CLAUDE_VERSION=$EXPECTED_CLAUDE_VERSION" \
+  "$CONTAINER_NAME" bash -lc '
   set -euo pipefail
+  runtime_config=/run/codex-ssh/sshd_config
   test "$(stat -c %U:%G /run/codex-ssh/authorized_keys)" = root:root
   test "$(stat -c %a /run/codex-ssh/authorized_keys)" = 644
-  effective="$(/usr/sbin/sshd -T -f /run/codex-ssh/sshd_config)"
+  test "$(grep -Ec "^SetEnv[[:space:]]+" "$runtime_config")" -eq 1
+
+  expected_setenv="SetEnv CODEX_HOME=$EXPECTED_HOME/.codex MISE_DATA_DIR=$EXPECTED_HOME/.local/share/mise MISE_CONFIG_DIR=$EXPECTED_HOME/.config/mise"
+  expected_tokens=(
+    "CODEX_HOME=$EXPECTED_HOME/.codex"
+    "MISE_DATA_DIR=$EXPECTED_HOME/.local/share/mise"
+    "MISE_CONFIG_DIR=$EXPECTED_HOME/.config/mise"
+  )
+  if [ -n "$SMOKE_EXPECT_CLAUDE_VERSION" ]; then
+    expected_setenv+=" DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
+    expected_tokens+=("DISABLE_AUTOUPDATER=1" "DISABLE_UPDATES=1")
+  fi
+  test "$(grep -E "^SetEnv[[:space:]]+" "$runtime_config")" = "$expected_setenv"
+
+  effective="$(/usr/sbin/sshd -T -f "$runtime_config")"
+  test "$(grep -c "^setenv " <<< "$effective")" -eq "${#expected_tokens[@]}"
+  for expected_token in "${expected_tokens[@]}"; do
+    grep -Fqx "setenv $expected_token" <<< "$effective"
+  done
+
   grep -qx "permitrootlogin no" <<< "$effective"
   grep -qx "passwordauthentication no" <<< "$effective"
   grep -qx "kbdinteractiveauthentication no" <<< "$effective"

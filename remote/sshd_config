@@ -22,9 +22,8 @@ UsePAM no
 IgnoreRhosts yes
 HostbasedAuthentication no
 PermitUserEnvironment no
-SetEnv CODEX_HOME=__DEV_HOME__/.codex
-SetEnv MISE_DATA_DIR=__DEV_HOME__/.local/share/mise
-SetEnv MISE_CONFIG_DIR=__DEV_HOME__/.config/mise
+# OpenSSH只采用第一条SetEnv；所有服务端变量必须保留在同一条指令中。
+SetEnv CODEX_HOME=__DEV_HOME__/.codex MISE_DATA_DIR=__DEV_HOME__/.local/share/mise MISE_CONFIG_DIR=__DEV_HOME__/.config/mise
 DisableForwarding yes
 AllowAgentForwarding no
 AllowTcpForwarding no

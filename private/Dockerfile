@@ -107,9 +107,33 @@ ARG CLAUDE_MANIFEST_SHA256
 USER root
 COPY --from=claude-fetch --chown=0:0 --chmod=0755 /opt/claude/claude /usr/local/bin/claude
 
-# sshd会话不保证继承daemon的任意环境，因此只在私有remote配置中显式下发更新禁用变量。
-RUN printf '\n# Claude Code由镜像发布链管理版本。\nSetEnv DISABLE_AUTOUPDATER=1\nSetEnv DISABLE_UPDATES=1\n' \
-        >> /etc/ssh/codex_sshd_config
+# OpenSSH只采用第一条SetEnv；规范化已发布的旧父模板后，在唯一指令中扩展私有更新禁用变量。
+RUN set -eux; \
+    config=/etc/ssh/codex_sshd_config; \
+    canonical_setenv='SetEnv CODEX_HOME=__DEV_HOME__/.codex MISE_DATA_DIR=__DEV_HOME__/.local/share/mise MISE_CONFIG_DIR=__DEV_HOME__/.config/mise'; \
+    final_setenv="${canonical_setenv} DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"; \
+    test -f "${config}"; \
+    setenv_count="$(grep -Ec '^SetEnv[[:space:]]+' "${config}")"; \
+    if [ "${setenv_count}" -eq 1 ] && grep -Fqx "${canonical_setenv}" "${config}"; then \
+        :; \
+    elif [ "${setenv_count}" -eq 3 ] \
+        && grep -Fqx 'SetEnv CODEX_HOME=__DEV_HOME__/.codex' "${config}" \
+        && grep -Fqx 'SetEnv MISE_DATA_DIR=__DEV_HOME__/.local/share/mise' "${config}" \
+        && grep -Fqx 'SetEnv MISE_CONFIG_DIR=__DEV_HOME__/.config/mise' "${config}"; then \
+        sed -i \
+            -e "s|^SetEnv CODEX_HOME=__DEV_HOME__/.codex$|${canonical_setenv}|" \
+            -e '/^SetEnv MISE_DATA_DIR=__DEV_HOME__\/.local\/share\/mise$/d' \
+            -e '/^SetEnv MISE_CONFIG_DIR=__DEV_HOME__\/.config\/mise$/d' \
+            "${config}"; \
+    else \
+        echo '公开remote父模板的SetEnv结构不受支持。' >&2; \
+        exit 1; \
+    fi; \
+    test "$(grep -Ec '^SetEnv[[:space:]]+' "${config}")" -eq 1; \
+    grep -Fqx "${canonical_setenv}" "${config}"; \
+    sed -i '/^SetEnv[[:space:]]/s/$/ DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1/' "${config}"; \
+    test "$(grep -Ec '^SetEnv[[:space:]]+' "${config}")" -eq 1; \
+    grep -Fqx "${final_setenv}" "${config}"
 
 ENV DISABLE_AUTOUPDATER=1 \
     DISABLE_UPDATES=1
