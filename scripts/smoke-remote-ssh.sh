@@ -116,6 +116,7 @@ fi
 
 remote_check_script="$(cat <<'EOF'
 set -euo pipefail
+trap 'status=$?; printf "remote SSH smoke断言失败：line=%s status=%s command=%q\n" "$LINENO" "$status" "$BASH_COMMAND" >&2; exit "$status"' ERR
 test "$(id -u)" -eq "$EXPECTED_UID"
 test "$(id -g)" -eq "$EXPECTED_GID"
 test "$HOME" = "$EXPECTED_HOME"
