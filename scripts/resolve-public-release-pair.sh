@@ -130,10 +130,10 @@ for index_file in "$base_index" "$remote_index"; do
   jq -e '.mediaType == "application/vnd.oci.image.index.v1+json" or .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json"' "$index_file" >/dev/null
   require_single_platform "$index_file" amd64
   require_single_platform "$index_file" arm64
-  jq -e '[.manifests[] | select(
+  jq -e '(.manifests | length) as $manifest_count | [.manifests[] | select(
     (.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) or
     (.platform.os == "unknown" and .platform.architecture == "unknown")
-  )] | length == (.manifests | length)' "$index_file" >/dev/null
+  )] | length == $manifest_count' "$index_file" >/dev/null
   jq -e '[.manifests[] | select(.platform.os == "linux")] | length == 2' "$index_file" >/dev/null
 done
 
