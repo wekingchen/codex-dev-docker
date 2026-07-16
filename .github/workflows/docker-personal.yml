@@ -809,10 +809,10 @@ jobs:
             jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length == 1' "$index" >/dev/null
             jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length == 1' "$index" >/dev/null
             jq -e '[.manifests[] | select(.platform.os == "linux")] | length == 2' "$index" >/dev/null
-            jq -e '[.manifests[] | select(
+            jq -e '(.manifests | length) as $manifest_count | [.manifests[] | select(
               (.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) or
               (.platform.os == "unknown" and .platform.architecture == "unknown")
-            )] | length == (.manifests | length)' "$index" >/dev/null
+            )] | length == $manifest_count' "$index" >/dev/null
             jq -e '[.manifests[] | select(.platform.os == "unknown" and .platform.architecture == "unknown")] | length >= 2' "$index" >/dev/null
 
             docker buildx imagetools inspect "$exact_ref" --format '{{json .Provenance}}' > "candidate-evidence/${role}-provenance.json"
