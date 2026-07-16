@@ -39,7 +39,7 @@ install -d -m 0755 -o root -g root /run/sshd
 /usr/sbin/sshd -t -f "$SSHD_CONFIG_RUNTIME"
 
 sshd_pid=""
-# shellcheck disable=SC2329  # 由下面的signal trap间接调用。
+# shellcheck disable=SC2317,SC2329  # 由下面的signal trap间接调用。
 forward_signal() {
   local signal="$1"
   if [ -n "$sshd_pid" ] && kill -0 "$sshd_pid" 2>/dev/null; then
