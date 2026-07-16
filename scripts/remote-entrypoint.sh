@@ -12,7 +12,8 @@ SSHD_CONFIG_RUNTIME="${SSHD_CONFIG_RUNTIME:-/run/codex-ssh/sshd_config}"
 install_authorized_keys() {
   /usr/local/bin/validate-authorized-keys.sh "$AUTHORIZED_KEYS_SOURCE"
   install -d -m 0755 -o root -g root "$(dirname "$AUTHORIZED_KEYS_RUNTIME")"
-  install -m 0600 -o root -g root "$AUTHORIZED_KEYS_SOURCE" "$AUTHORIZED_KEYS_RUNTIME"
+  # sshd会以目标用户身份读取该文件；root-owned 0644允许读取但禁止dev修改授权集合。
+  install -m 0644 -o root -g root "$AUTHORIZED_KEYS_SOURCE" "$AUTHORIZED_KEYS_RUNTIME"
 }
 
 render_sshd_config() {

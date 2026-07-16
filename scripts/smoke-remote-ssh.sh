@@ -133,7 +133,11 @@ test -z "${SSH_AUTH_SOCK:-}"
 EOF
 )"
 printf -v remote_check_quoted '%q' "$remote_check_script"
-output="$(ssh_run "EXPECTED_UID=$(id -u) EXPECTED_GID=$(id -g) EXPECTED_HOME=$REMOTE_HOME bash -lc $remote_check_quoted")"
+if ! output="$(ssh_run "EXPECTED_UID=$(id -u) EXPECTED_GID=$(id -g) EXPECTED_HOME=$REMOTE_HOME bash -lc $remote_check_quoted")"; then
+  docker logs "$CONTAINER_NAME" >&2 || true
+  echo "正确公钥无法完成remote SSH smoke。" >&2
+  exit 1
+fi
 printf '%s\n' "$output"
 
 actual_version="$(awk -F= '$1 == "CODEX_VERSION" {print $2; exit}' <<< "$output")"
@@ -184,7 +188,7 @@ fi
 docker exec "$CONTAINER_NAME" bash -lc '
   set -euo pipefail
   test "$(stat -c %U:%G /run/codex-ssh/authorized_keys)" = root:root
-  test "$(stat -c %a /run/codex-ssh/authorized_keys)" = 600
+  test "$(stat -c %a /run/codex-ssh/authorized_keys)" = 644
   effective="$(/usr/sbin/sshd -T -f /run/codex-ssh/sshd_config)"
   grep -qx "permitrootlogin no" <<< "$effective"
   grep -qx "passwordauthentication no" <<< "$effective"

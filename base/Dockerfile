@@ -25,7 +25,8 @@ ENV PATH=/home/${USERNAME}/.local/share/mise/shims:/usr/local/bin:/home/${USERNA
 
 # 共享 runtime 只提供 Codex 通用工具，不预装完整技术栈。
 # 项目需要的语言运行时和依赖，后续由 Codex 根据项目内容在容器内安装。
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     bash \
     bash-completion \
     ca-certificates \
@@ -173,7 +174,8 @@ RUN mkdir -p "${CODEX_HOME}" "${MISE_DATA_DIR}" "${MISE_CONFIG_DIR}" /home/${USE
 FROM runtime AS remote
 
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-server \
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends openssh-server \
     && rm -f /etc/ssh/ssh_host_* \
     && install -d -m 0700 /etc/ssh/codex-host-keys \
     && rm -rf /var/lib/apt/lists/*
