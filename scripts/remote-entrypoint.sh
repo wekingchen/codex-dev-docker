@@ -22,7 +22,15 @@ render_sshd_config() {
     exit 1
   fi
 
-  sed "s/__DEV_USER__/${DEV_USER}/g" "$SSHD_CONFIG_TEMPLATE" > "$SSHD_CONFIG_RUNTIME"
+  if [ "$DEV_HOME" != "/home/${DEV_USER}" ]; then
+    echo "remote镜像要求DEV_HOME与DEV_USER匹配：期望/home/${DEV_USER}，实际$DEV_HOME" >&2
+    exit 1
+  fi
+
+  sed \
+    -e "s/__DEV_USER__/${DEV_USER}/g" \
+    -e "s|__DEV_HOME__|${DEV_HOME}|g" \
+    "$SSHD_CONFIG_TEMPLATE" > "$SSHD_CONFIG_RUNTIME"
   chmod 0600 "$SSHD_CONFIG_RUNTIME"
   chown root:root "$SSHD_CONFIG_RUNTIME"
 }

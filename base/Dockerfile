@@ -174,8 +174,14 @@ RUN mkdir -p "${CODEX_HOME}" "${MISE_DATA_DIR}" "${MISE_CONFIG_DIR}" /home/${USE
 FROM runtime AS remote
 
 USER root
-RUN apt-get -o Acquire::Retries=5 update \
-    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends openssh-server \
+# runtime已安装ca-certificates；remote层改用HTTPS，降低跨架构runner访问HTTP镜像源的失败率。
+RUN sed -i \
+        -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+        -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
+        -e 's|http://ports.ubuntu.com/ubuntu-ports|https://ports.ubuntu.com/ubuntu-ports|g' \
+        /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get -o Acquire::Retries=5 -o Acquire::https::Timeout=30 update \
+    && apt-get -o Acquire::Retries=5 -o Acquire::https::Timeout=30 install -y --no-install-recommends openssh-server \
     && rm -f /etc/ssh/ssh_host_* \
     && install -d -m 0700 /etc/ssh/codex-host-keys \
     && rm -rf /var/lib/apt/lists/*
