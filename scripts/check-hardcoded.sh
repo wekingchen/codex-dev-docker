@@ -28,6 +28,7 @@ FILES_TO_CHECK=(
   "scripts/dev-init.sh"
   "scripts/dev-entrypoint.sh"
   "scripts/remote-entrypoint.sh"
+  "scripts/validate-xray-config.sh"
   "scripts/personal-remote-entrypoint.sh"
   "scripts/personal-remote-healthcheck.sh"
   "scripts/audit-xray-private-supply-chain.sh"

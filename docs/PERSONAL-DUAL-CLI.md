@@ -360,16 +360,20 @@ chown root:root /root/codex/xray/config.json
 chmod 0600 /root/codex/xray/config.json
 ```
 
-配置必须满足容器启动契约：
+配置必须满足公共启动契约：
 
 - 严格JSON，不使用JSONC/YAML或相对文件路径。
-- 至少一个HTTP inbound精确监听 `127.0.0.1:10809`。
+- 恰有一个HTTP inbound精确监听 `127.0.0.1:10809`。
 - 所有inbound只能监听 `127.0.0.1` 或 `::1`。
 - `log.access` 必须为 `none`，`loglevel`只能为 `warning`、`error` 或 `none`，`dnsLog`不能为true。
 - 第一个/default outbound必须是实际远端代理，不能是 `freedom` 或 `blackhole`。
-- 不允许任何 `freedom` outbound，避免启用代理后静默直连。
 
-结构示例仅展示安全外壳；不要把真实节点值写入仓库或Stack：
+验证器支持两种配置档案：
+
+1. `all-proxy`：没有任何 `freedom` outbound，所有未被其他非直连规则匹配的流量使用第一个远端代理。
+2. `cn-direct`：只允许中国域名和中国IP直连，必须严格使用下面的规范化结构。不能添加第四个outbound、额外routing rule、balancer、catch-all direct，或通过 `proxySettings`/`dialerProxy` 间接引用direct。
+
+`cn-direct` 的 `outbounds` 顺序必须精确为 `proxy`、`direct`、`block`，routing rules顺序必须精确为“私网阻断、中国域名直连、中国IP直连”：
 
 ```json
 {
@@ -402,16 +406,52 @@ chmod 0600 /root/codex/xray/config.json
           }
         ]
       }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "UseIP",
+        "finalRules": [
+          {
+            "action": "block",
+            "ip": ["geoip:private"]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole",
+      "settings": {}
     }
   ],
   "routing": {
-    "domainStrategy": "AsIs",
-    "rules": []
+    "domainStrategy": "IPOnDemand",
+    "rules": [
+      {
+        "type": "field",
+        "ip": ["geoip:private"],
+        "outboundTag": "block"
+      },
+      {
+        "type": "field",
+        "domain": ["geosite:cn"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "ip": ["geoip:cn"],
+        "outboundTag": "direct"
+      }
+    ]
   }
 }
 ```
 
-不同outbound协议的schema不同，上述 `settings` 只是占位结构，必须按你的节点协议改写。真实节点地址、UUID、密码、私钥和订阅URL只应存在于宿主机root-only配置。若配置引用额外CA、证书或密钥文件，使用容器内绝对路径单独只读挂载，并确保UID/GID 65532的Xray进程具有所需读取权限。
+`IPOnDemand`会在开始匹配前解析目标IP，因此规则按顺序执行时，解析到私网的域名也会先命中 `geoip:private -> block`；随后 `geosite:cn`中国域名直连，`geoip:cn`中国IP直连，其余流量没有匹配规则，因此落到第一个 `proxy` outbound。`direct` 的 `finalRules` 还会在最终解析后再次阻断 `geoip:private`，形成第二层防护。Xray使用容器resolver完成必要的IP解析，本契约不提供高级split-DNS或防DNS泄漏保证。
+
+不同代理协议的schema不同，上述 `proxy.settings` 只是占位结构，必须按你的节点协议改写；`direct`、`block`和三条routing rule则不能改动或扩展。真实节点地址、UUID、密码、私钥和订阅URL只应存在于宿主机root-only配置。若配置引用额外CA、证书或密钥文件，使用容器内绝对路径单独只读挂载，并确保UID/GID 65532的Xray进程具有所需读取权限。
 
 容器内的 `dev` 用户保留 `NOPASSWD sudo`，因此本来就等价于该容器root；Xray以UID/GID 65532运行是进程最小权限，不是对 `dev` 隐藏节点配置的边界。不要把容器SSH公钥授权给不可信用户。
 
@@ -423,8 +463,8 @@ Stack中只有一个开关：
 XRAY_PROXY_ENABLED: "true"
 ```
 
-- `"true"`：验证并启动Xray，等待10809就绪后再启动sshd；SSH中的Codex和Claude Code获得大小写 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`。
-- `"false"`：不要求有效Xray配置、不启动Xray、不监听10809，也不向SSH/login shell注入代理变量，两个CLI直接联网。
+- `"true"`：验证并启动Xray，等待10809就绪后再启动sshd；SSH中的Codex和Claude Code获得大小写 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`。实际出站由配置档案决定：`all-proxy`全部走远端代理，`cn-direct`仅中国域名/IP直连、其他流量走远端代理。
+- `"false"`：不要求有效Xray配置、不启动Xray、不监听10809，也不向SSH/login shell注入代理变量，两个CLI全部直接联网。
 - 其他值：容器拒绝启动。
 - 不要在Stack中另外设置 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 或 `NO_PROXY`（包括小写形式）；personal entrypoint会拒绝这些旁路配置，代理只由单一开关管理。
 
@@ -446,11 +486,17 @@ docker exec --user dev codex-ssh bash -lc 'claude --version'
 
 ### 真实代理E2E
 
+先在Docker宿主机记录直接出口IP：
+
+```bash
+curl --fail --show-error https://api.ipify.org
+```
+
 开启代理后在容器SSH会话中执行：
 
 ```bash
 echo "$HTTPS_PROXY"
-curl --fail --show-error --proxy http://127.0.0.1:10809 https://api.ipify.org
+curl --fail --show-error https://api.ipify.org
 codex
 claude
 ```
@@ -458,11 +504,15 @@ claude
 需要同时确认：
 
 - `HTTPS_PROXY` 为 `http://127.0.0.1:10809`。
-- 出口IP与关闭代理后的直接出口不同。
+- `all-proxy` 档案下，境外IP回显结果与宿主机直接出口不同，并等于VLESS等远端节点出口。
+- `cn-direct` 档案下，使用你信任的中国境内IP回显端点时，结果应等于宿主机直接出口；使用 `api.ipify.org` 等未匹配中国规则的端点时，结果应等于远端代理出口。
+- 访问私有IP的请求被 `geoip:private -> block` 阻断；不要用生产内网服务做破坏性测试。
 - Codex真实Responses请求成功，包括WebSocket路径及必要时的HTTPS fallback。
 - Claude Code真实请求成功。
 - `docker inspect codex-ssh --format '{{json .NetworkSettings.Ports}}'` 只显示2222映射，没有10809。
 - `docker logs codex-ssh` 不出现UUID、密码、订阅URL或长期access log。
+
+仅访问中国网站并不能证明发生了直连，必须使用可信的中国境内IP回显端点比较出口。`IPOnDemand`可能通过容器resolver解析域名，本方案不声称隐藏所有DNS查询。
 
 关闭开关并Recreate后，再确认 `env | grep -i proxy` 不包含HTTP/HTTPS代理变量，`pgrep -x xray`无结果，两个CLI仍能直接联网。
 

@@ -336,6 +336,7 @@ jobs:
       - name: 解析最新非draft Xray release并验证asset元数据
         id: xray
         env:
+          GH_TOKEN: ${{ github.token }}
           AUDIT_EVIDENCE_DIR: ${{ runner.temp }}/xray-release-evidence
         run: ./scripts/audit-xray-private-supply-chain.sh --resolve-only
 
@@ -1182,6 +1183,7 @@ jobs:
           EXPECTED_ARM64: ${{ needs.resolve-xray.outputs.sha256_arm64 }}
           EXPECTED_SIZE_AMD64: ${{ needs.resolve-xray.outputs.size_amd64 }}
           EXPECTED_SIZE_ARM64: ${{ needs.resolve-xray.outputs.size_arm64 }}
+          GH_TOKEN: ${{ github.token }}
           AUDIT_EVIDENCE_DIR: ${{ runner.temp }}/xray-promotion-recheck
         shell: bash
         run: |

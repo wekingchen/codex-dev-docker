@@ -29,6 +29,7 @@ jobs:
 
       - name: 运行Xray latest只读供应链审计
         env:
+          GH_TOKEN: ${{ github.token }}
           AUDIT_EVIDENCE_DIR: ${{ runner.temp }}/personal-audit-evidence/xray
         run: ./scripts/audit-xray-private-supply-chain.sh
 
