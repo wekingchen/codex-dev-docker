@@ -149,9 +149,9 @@ start_xray() {
 }
 
 wait_for_xray_readiness() {
-  local attempt
+  local _attempt
 
-  for attempt in $(seq 1 30); do
+  for _attempt in $(seq 1 30); do
     if ! kill -0 "$xray_pid" 2>/dev/null; then
       wait "$xray_pid" || true
       echo "Xray在HTTP inbound就绪前退出。" >&2

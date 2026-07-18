@@ -100,8 +100,8 @@ start_remote() {
     --volume "$HOST_KEY_VOLUME:/etc/ssh/codex-host-keys:ro"
     --volume "$CLIENT_KEY.pub:/etc/codex-ssh/authorized_keys.input:ro"
     --volume "$WORKSPACE_DIR:/workspace"
-    --tmpfs /run:rw,nosuid,nodev,mode=0755
-    --tmpfs /tmp:rw,nosuid,nodev,mode=1777
+    --tmpfs "/run:rw,nosuid,nodev,mode=0755"
+    --tmpfs "/tmp:rw,nosuid,nodev,mode=1777"
     --env "HOST_UID=$(id -u)"
     --env "HOST_GID=$(id -g)"
   )
@@ -204,6 +204,7 @@ if [ -n "$EXPECTED_XRAY_VERSION" ]; then
   XRAY_PROXY_ENABLED_FOR_RUN=false
   start_remote
   wait_for_ssh
+  # shellcheck disable=SC2016  # 变量必须在远程SSH会话中展开。
   ssh_run 'set -euo pipefail; test -z "${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}${NO_PROXY:-}${http_proxy:-}${https_proxy:-}${all_proxy:-}${no_proxy:-}"'
   docker exec "$CONTAINER_NAME" bash -lc '
     set -euo pipefail
@@ -421,12 +422,14 @@ docker exec \
     test "$(stat -c %a /usr/local/bin/xray)" = 755
     test "$(stat -c %U:%G /run/xray/config.json)" = root:xray
     test "$(stat -c %a /run/xray/config.json)" = 640
-    test "$(ps -o user= -C xray | awk 'NF {print $1; exit}')" = xray
-    test "$(xray version | awk 'NR == 1 {print $2}')" = "$SMOKE_EXPECT_XRAY_VERSION"
+    test "$(ps -o user= -C xray | awk "NF {print \$1; exit}")" = xray
+    test "$(xray version | awk "NR == 1 {print \$2}")" = "$SMOKE_EXPECT_XRAY_VERSION"
     nc -z 127.0.0.1 10809
-    listeners="$(ss -H -lnt 'sport = :10809')"
+    listeners="$(ss -H -lnt "sport = :10809")"
     test -n "$listeners"
-    ! grep -Eq '(^|[[:space:]])(0\.0\.0\.0|\[?::\]?):10809([[:space:]]|$)' <<< "$listeners"
+    grep -Fq "127.0.0.1:10809" <<< "$listeners"
+    ! grep -Fq "0.0.0.0:10809" <<< "$listeners"
+    ! grep -Fq "[::]:10809" <<< "$listeners"
     test "$HTTP_PROXY" = http://127.0.0.1:10809
     test "$HTTPS_PROXY" = http://127.0.0.1:10809
     test "$NO_PROXY" = localhost,127.0.0.1,::1

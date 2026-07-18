@@ -114,7 +114,7 @@ check_static_contract() {
     'ARG XRAY_SHA256_ARM64' \
     'ARG XRAY_SIZE_AMD64' \
     'ARG XRAY_SIZE_ARM64' \
-    'https://github.com/XTLS/Xray-core/releases/download/${XRAY_TAG}/' \
+    "https://github.com/XTLS/Xray-core/releases/download/\${XRAY_TAG}/" \
     'XRAY_PROXY_ENABLED=false' \
     'ENTRYPOINT ["/usr/local/bin/personal-remote-entrypoint.sh"]' \
     'io.codex-dev.xray.signed="false"'; do
@@ -140,7 +140,7 @@ check_static_contract() {
     "${REPO_ROOT}/compose.remote.yaml" \
     "${REPO_ROOT}/templates/portainer-stack.yaml"; do
     if [ -f "$file" ] && grep -Eiq '(^|[^[:alnum:]_])(xray|XRAY_PROXY_ENABLED)([^[:alnum:]_]|$)' "$file"; then
-      echo "公开镜像或默认运行配置不得安装或启用Xray：${file#${REPO_ROOT}/}" >&2
+      echo "公开镜像或默认运行配置不得安装或启用Xray：${file#"${REPO_ROOT}"/}" >&2
       exit 1
     fi
   done
