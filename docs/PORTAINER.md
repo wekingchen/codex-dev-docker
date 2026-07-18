@@ -4,7 +4,7 @@
 
 > 如果 Portainer Endpoint 使用 Docker Swarm，请不要直接套用本文。Swarm routing mesh、`depends_on` 和 loopback 端口发布语义不同，需要单独设计。
 
-仓库同时提供可直接粘贴到 Portainer 的公开Codex-only模板：[`templates/portainer-stack.yaml`](../templates/portainer-stack.yaml)。个人私有Codex + Claude Code镜像的GHCR认证、bootstrap与替换方法见 [`PERSONAL-DUAL-CLI.md`](PERSONAL-DUAL-CLI.md)。
+部署前先选择路径，不要混用两个模板：公开Codex-only使用 [`templates/portainer-stack.yaml`](../templates/portainer-stack.yaml)；owner本人使用Codex + Claude Code + 可选Xray时使用 [`templates/portainer-personal-stack.yaml`](../templates/portainer-personal-stack.yaml)，并同时完成 [`PERSONAL-DUAL-CLI.md`](PERSONAL-DUAL-CLI.md) 中的private GHCR认证、bootstrap与Xray配置步骤。
 
 ## 1. 最终架构
 
@@ -65,7 +65,7 @@ ghcr.io/wekingchen/codex-dev-personal-remote:latest
 ghcr.io/wekingchen/codex-dev-personal-remote@sha256:<remote-root-digest>
 ```
 
-personal-remote把Xray和sshd运行在同一容器中，Xray只监听容器 `127.0.0.1:10809`，宿主机仍只发布 `127.0.0.1:2222`。`XRAY_PROXY_ENABLED="true"` 启用Xray，`"false"` 完全停用；启用时配置可选择无 `freedom` 的 `all-proxy`，或严格的 `cn-direct`（中国域名/IP直连、私网阻断、其他流量代理）。真实节点配置从宿主机 `/root/codex/xray/config.json` 只读挂载，不能写入Stack environment。完整配置契约、目录权限和E2E见 [`PERSONAL-DUAL-CLI.md`](PERSONAL-DUAL-CLI.md)。PAT只保存在Portainer registry credential中；Claude登录保存在 `/root/codex/dev-home`。
+personal-remote把Xray和sshd运行在同一容器中，Xray固定以UID/GID `65532:65532` 运行；配置必须恰好包含一个 `127.0.0.1:10809` HTTP inbound，所有inbound都只能监听容器loopback，宿主机仍只发布 `127.0.0.1:2222`；代理开启时任一长期进程异常退出都会让容器整体fail closed。`XRAY_PROXY_ENABLED="true"` 启用Xray，`"false"` 完全停用；启用时配置可选择禁止任何 `freedom`、未被其他非直连规则处理的流量使用第一个非直连outbound的 `all-proxy`，或严格的 `cn-direct`（私网阻断、中国域名/IP直连、其他未匹配流量代理）。真实节点配置从宿主机 `/root/codex/xray/config.json` 只读挂载，不能写入Stack environment；专用模板在关闭模式下仍声明该bind，所以源文件必须存在。完整配置契约、目录权限和E2E见 [`PERSONAL-DUAL-CLI.md`](PERSONAL-DUAL-CLI.md)。PAT只保存在Portainer registry credential中；Claude登录保存在 `/root/codex/dev-home`。
 
 ### `codex-ssh-hostkey-init`
 
@@ -141,12 +141,16 @@ personal Xray模板还需要：
 mkdir -p /root/codex/xray
 chown root:root /root/codex/xray
 chmod 0700 /root/codex/xray
-# 写入真实配置后：
+# 写入配置后：
 chown root:root /root/codex/xray/config.json
 chmod 0600 /root/codex/xray/config.json
 ```
 
-中国分流配置不能简单添加宽泛的 `freedom`。严格 `cn-direct` 档案要求outbounds精确按 `proxy`、`direct`、`block` 排列，routing rules精确按 `geoip:private -> block`、`geosite:cn -> direct`、`geoip:cn -> direct` 排列，routing `domainStrategy`为 `IPOnDemand`，并由freedom `finalRules`再次阻断 `geoip:private`；其他未匹配流量默认使用第一个proxy。任何额外direct规则、catch-all direct、balancer或间接dialer引用都会使容器fail closed拒绝启动。完整JSON见 [`PERSONAL-DUAL-CLI.md`](PERSONAL-DUAL-CLI.md)。
+专用模板全部使用 `create_host_path:false`，所以这些目录和文件必须在Deploy/Update之前存在。模板默认 `XRAY_PROXY_ENABLED="true"`，此时 `config.json` 必须是满足安全契约且能通过 `xray run -test` 的真实配置；若先把开关设为 `"false"`，内容暂时可以不通过Xray验证，但源文件仍必须存在，例如可先创建root-only的 `{}` 占位文件。
+
+中国分流配置不能简单添加宽泛的 `freedom`。严格 `cn-direct` 档案要求outbounds精确按 `proxy`、`direct`、`block` 排列，routing rules精确按 `geoip:private -> block`、`geosite:cn -> direct`、`geoip:cn -> direct` 排列，routing `domainStrategy`为 `IPOnDemand`，并由freedom `finalRules`再次阻断 `geoip:private`；其他未匹配流量默认使用第一个proxy。任何额外direct规则、catch-all direct、balancer或间接dialer引用都会使容器fail closed拒绝启动。完整契约见 [`PERSONAL-DUAL-CLI.md`](PERSONAL-DUAL-CLI.md)。
+
+镜像内置geo asset已保证Xray用户可读。配置引用额外CA、证书、私钥或自定义geo asset时，必须单独只读挂载并让UID/GID 65532具有最小读取/目录遍历权限；秘密文件可使用 `root:65532 0640`，不要把整个root-only配置目录改为全局可读。
 
 如果宿主机实际使用其他非零 UID/GID，应同时修改目录所有权和 Stack 中的：
 
@@ -155,7 +159,7 @@ HOST_UID: "1000"
 HOST_GID: "1000"
 ```
 
-禁止把它们设置为 `0`。镜像也不会递归修改 `/workspace` 的宿主机所有权，所以 workspace 必须提前可写。
+禁止把它们设置为 `0`。personal-remote还保留 `65532:65532` 给Xray，因此personal Stack的 `HOST_UID` 或 `HOST_GID` 任一值也不得为65532，否则容器会fail closed拒绝启动。镜像不会递归修改 `/workspace` 的宿主机所有权，所以 workspace 必须提前可写。
 
 ## 4. 使用 PuTTYgen 准备容器登录密钥
 
@@ -249,11 +253,11 @@ chmod 0600 /root/codex/ssh/authorized_keys
 docker start codex-ssh
 ```
 
-随后验证保留的密钥可以登录、已撤销的密钥无法登录。若公钥文件曾被编辑器以“写入新文件再重命名”的方式替换，文件 bind mount 可能仍指向旧 inode；此时应在 Portainer 中 **Recreate** `codex-ssh` 或重新部署 Stack，而不能只依赖普通 restart。
+随后验证保留的密钥可以登录、已撤销的密钥无法登录。若公钥文件曾被编辑器以“写入新文件再重命名”的方式替换，文件bind mount可能仍指向旧inode；此时必须在Portainer中明确 **Recreate/force recreate** `codex-ssh`，普通restart或YAML未变化的普通Update Stack都不能证明已切换到新inode。
 
 ## 5. 最终 Portainer Stack
 
-以下服务配置与 [`templates/portainer-stack.yaml`](../templates/portainer-stack.yaml) 等效，可直接粘贴到 Portainer Stack Editor；仓库模板额外保留了操作提示注释：
+以下服务配置与公开 [`templates/portainer-stack.yaml`](../templates/portainer-stack.yaml) 等效，可直接粘贴到 Portainer Stack Editor；仓库模板额外保留了操作提示注释。personal用户不要在这段公开YAML上零散添加Xray字段，应直接使用完整的 [`templates/portainer-personal-stack.yaml`](../templates/portainer-personal-stack.yaml)。
 
 ```yaml
 services:
@@ -355,10 +359,12 @@ pull_policy: always
 ## 6. Portainer 首次部署
 
 1. 停止并删除旧的 base `codex` 容器或旧 Stack服务。
-2. 打开 Portainer → `Stacks` → 新建或编辑 Stack。
-3. 粘贴上述 YAML。
-4. 勾选重新拉取镜像。
-5. 点击 `Deploy the stack` 或 `Update the stack`。
+2. 确认第3至第4节中的workspace、dev-home、SSH目录、host key目录和 `authorized_keys` 均已创建且权限正确。
+3. 选择一个完整模板：公开Codex-only使用 `templates/portainer-stack.yaml`；personal双CLI/Xray使用 `templates/portainer-personal-stack.yaml`，并确认Portainer已配置private GHCR credential及Xray源文件。
+4. 核对所有 `create_host_path:false` 的bind源都已存在；personal模板还要确认 `HOST_UID/HOST_GID` 不是0或65532，且宿主端口仍只有 `127.0.0.1:2222:2222`。
+5. 打开 Portainer → `Stacks` → 新建或编辑 Stack，粘贴所选模板的完整内容。
+6. 勾选重新拉取镜像。
+7. 点击 `Deploy the stack` 或 `Update the stack`。
 
 部署结果：
 
@@ -408,7 +414,7 @@ ss -lntp | grep ':2222'
 [::]:2222
 ```
 
-不要在路由器、防火墙或云安全组中开放 `2222`。
+不要在路由器、防火墙或云安全组中开放 `2222`。personal模式的10809只能存在于容器loopback；`docker inspect codex-ssh --format '{{json .NetworkSettings.Ports}}'` 不得显示10809宿主映射，宿主 `ss -lntp` 也不应出现由该Stack发布的10809监听。
 
 ## 8. 获取并核对容器 host fingerprint
 
@@ -532,6 +538,22 @@ sudo        → 成功
 
 SSH 登录会话按系统规则从用户 home `/home/dev` 开始；Compose 的 `working_dir` 只影响容器主进程，不会改变 sshd 登录目录。进入项目后再切换到 workspace。
 
+### Portainer root Console不是SSH `dev` 会话
+
+Portainer的Container Console通常打开容器root的普通非-login shell。它不经过sshd `SetEnv`，也不会自动加载 `/etc/profile.d`，因此personal模式下直接查看 `HTTP_PROXY`/`HTTPS_PROXY` 可能为空；这不代表Xray没有生效。不要在root Console中直接运行日常Codex/Claude Code或修改workspace/home，否则容易创建root-owned文件并得到与真实SSH会话不同的环境。
+
+真实CLI验证应通过PuTTY/SSH登录 `dev`。如必须从Portainer Console进入开发login shell，可执行：
+
+```bash
+exec gosu dev env \
+  HOME=/home/dev \
+  USER=dev \
+  LOGNAME=dev \
+  bash -l
+```
+
+随后确认 `whoami` 为 `dev`。若只想临时诊断root login-shell的动态代理环境，可执行 `bash -lc 'env | grep -i proxy'` 或显式加载 `. /run/codex-proxy/env.sh`，但不要把root Console结果当作SSH `dev` E2E的替代。
+
 推荐使用 tmux：
 
 ```bash
@@ -570,7 +592,7 @@ codex
 
 ## 12. 日常更新远程 Codex
 
-仅重启旧容器不会更新镜像，必须重新拉取 `latest` 并重建 Stack。
+Portainer中的操作不能混用：**Restart**只重启现有容器，不拉取新镜像，也不应用新的environment或bind定义；**Re-pull/Pull latest**只取得标签当前镜像；**Update Stack**只在检测到Stack定义或镜像变化时重建受影响服务；**Recreate/force recreate**则无论YAML是否变化都生成新容器。更新 `:latest` 必须重新拉取并更新整个Stack；原子替换bind源文件时必须force recreate。
 
 ### 12.1 更新前
 
@@ -605,8 +627,8 @@ Portainer → `Stacks` → 当前 Stack → `Editor`：
    ```
 
 2. 勾选 `Re-pull image` 或 `Pull latest image`。
-3. 点击 `Update the stack`。
-4. 等待 `codex-ssh` 变为 `Healthy`。
+3. 点击 `Update the stack`，完整重建该Stack；不要只在Containers页面重建单个 `codex-ssh`。
+4. 等待 `codex-ssh-hostkey-init` 再次正常退出，并确认 `codex-ssh` 变为 `Healthy`。
 
 如果 Portainer 没有重新拉取，可以先在宿主机执行：
 
@@ -616,7 +638,7 @@ docker pull ghcr.io/wekingchen/codex-dev-remote:latest
 
 再回到 Portainer 重新部署。单纯点击 `Restart` 不会切换到新镜像。
 
-personal双CLI Stack使用相同流程，但镜像名应为 `codex-dev-personal-remote`，并先确认最新private workflow已成功。Portainer必须继续使用已配置的GHCR private registry credential。
+personal双CLI Stack使用相同流程，但镜像名应为 `codex-dev-personal-remote`，并先确认最新private workflow已成功。Portainer必须继续使用已配置的GHCR private registry credential。切换 `XRAY_PROXY_ENABLED` 或修改volume定义时应Update整个Stack，配置差异会触发重建。仅替换Xray配置内容时则应明确执行可保证生成新容器的 **Recreate/force recreate**：编辑器或WinSCP常以“写新文件再rename”方式保存，bind源inode会变化，而普通Restart或YAML未变化的普通Update Stack可能继续引用旧文件。操作后核对容器ID或创建时间已变化，再检查runtime配置与healthcheck。
 
 ### 12.3 更新后验证
 
@@ -626,11 +648,17 @@ docker inspect codex-ssh \
 
 docker exec --user dev codex-ssh codex --version
 docker exec --user dev codex-ssh mise --version
-# personal双CLI Stack另外执行：
+# personal双CLI Stack执行：
 docker exec --user dev codex-ssh bash -lc 'claude --version'
 docker exec codex-ssh xray version
 docker exec codex-ssh /usr/local/bin/personal-remote-healthcheck.sh
+# 仅XRAY_PROXY_ENABLED=true时执行以下权限检查：
+docker exec codex-ssh stat -c '%U:%G %a %n' /run/xray/config.json
+docker exec codex-ssh gosu xray:xray test -r /usr/local/share/xray/geoip.dat
+docker exec codex-ssh gosu xray:xray test -r /usr/local/share/xray/geosite.dat
 ```
+
+开启Xray时，runtime配置应显示 `root:xray 640`，两个geo asset读取检查应成功。
 
 更新不会删除：
 
@@ -639,9 +667,10 @@ docker exec codex-ssh /usr/local/bin/personal-remote-healthcheck.sh
 /root/codex/dev-home
 /root/codex/ssh/authorized_keys
 /root/codex/ssh-hostkeys
+/root/codex/xray/config.json（personal Stack）
 ```
 
-SSH host fingerprint也不应改变。如果 WinSCP突然报告host key变化，不要直接接受，应检查 `/root/codex/ssh-hostkeys` 是否被删除、替换或挂载到了错误路径。
+镜像更新或回滚不会自动回滚Xray节点配置，应单独备份并记录其版本。SSH host fingerprint也不应改变。如果 WinSCP突然报告host key变化，不要直接接受，应检查 `/root/codex/ssh-hostkeys` 是否被删除、替换或挂载到了错误路径。
 
 ## 13. 回滚镜像
 
@@ -651,7 +680,7 @@ SSH host fingerprint也不应改变。如果 WinSCP突然报告host key变化，
 image: ghcr.io/wekingchen/codex-dev-remote@sha256:<已知正常-digest>
 ```
 
-然后勾选重新拉取并重新部署整个 Stack。digest 是 OCI 内容地址，不会被同名标签移动；重新部署后，workspace、home、授权公钥和host fingerprint仍会保留。
+personal Stack应把两处同时固定为同一个已知正常的 `ghcr.io/wekingchen/codex-dev-personal-remote@sha256:<digest>`。然后勾选重新拉取并重新部署整个Stack。digest是OCI内容地址，不会被同名标签移动；重新部署后，workspace、home、授权公钥、host fingerprint和宿主Xray配置仍会保留，但镜像回滚不会回滚Xray配置本身。
 
 正式发布也会生成短 commit 标签：
 
@@ -706,7 +735,8 @@ docker logs --tail=200 codex-ssh
 
 - `/root/codex/ssh/authorized_keys` 不存在或格式错误。
 - workspace/home/host-key目录未提前创建。
-- `HOST_UID/HOST_GID` 与宿主机目录所有权不一致。
+- `HOST_UID/HOST_GID` 与宿主机目录所有权不一致，或personal模式误用了保留值65532。
+- personal模板的 `/root/codex/xray/config.json` 源文件不存在；即使开关为 `false`，Docker也会先解析bind mount。
 - Xray配置权限不是root-only，或 `cn-direct` 的outbound/routing顺序和内容不符合严格契约。
 - `2222` 已被其他宿主机进程占用。
 
@@ -760,10 +790,13 @@ docker pull ghcr.io/wekingchen/codex-dev-remote:latest
 - [ ] WinSCP Tunnel使用宿主机SSH凭据。
 - [ ] WinSCP主连接使用容器专用凭据。
 - [ ] 首次连接已核对容器host fingerprint。
-- [ ] workspace与dev-home由非零UID/GID拥有。
+- [ ] workspace与dev-home由非零UID/GID拥有；personal模式没有使用保留值65532。
 - [ ] Stack没有挂载Docker socket、宿主私钥或宿主根目录。
-- [ ] personal代理开启时，Xray配置为root-only、inbound只监听容器loopback，宿主机没有10809映射。
-- [ ] 使用 `cn-direct` 时，私网已阻断、中国域名/IP直连、其他流量代理，且没有额外direct规则或balancer。
-- [ ] `XRAY_PROXY_ENABLED` 只使用严格的 `"true"` 或 `"false"`，切换后已Recreate并验证对应出口。
+- [ ] personal模板的Xray bind源文件存在，即使当前开关为 `false`。
+- [ ] personal代理开启时，Xray源配置为root-only且不是符号链接，runtime副本为 `root:xray 0640`，进程以UID/GID 65532运行。
+- [ ] personal代理开启时，所有inbound只监听容器loopback，宿主机没有10809映射；Xray或sshd任一异常退出会让容器整体失败。
+- [ ] 使用 `cn-direct` 时，私网已阻断、中国域名/IP直连、其他未匹配流量代理，且没有额外direct规则或balancer。
+- [ ] `XRAY_PROXY_ENABLED` 只使用严格的 `"true"` 或 `"false"`，切换后已Update整个Stack/Recreate并验证对应出口。
+- [ ] 已知Portainer root Console普通非-login shell没有动态代理变量属于正常现象；真实CLI E2E通过SSH `dev` 会话完成。
 - [ ] 每次更新前都已记录当前运行镜像的 repository digest。
-- [ ] 更新镜像时使用Re-pull并重建，而不是仅Restart。
+- [ ] 更新镜像时两个服务保持同一引用，并使用Re-pull后Update整个Stack，而不是仅Restart。

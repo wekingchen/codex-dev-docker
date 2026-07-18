@@ -62,14 +62,14 @@ Dependabot继续更新 GitHub Actions 和 Docker tag；同 tag Ubuntu digest、m
 
 ## 个人私有 Codex + Claude Code 双 CLI
 
-公开 `codex-dev-base`、`codex-dev-remote` 和 Portainer模板继续保持Codex-only。仓库另提供仅供owner本人使用的私有派生流程：
+公开 `codex-dev-base`、`codex-dev-remote`、Compose默认值和公开模板 `templates/portainer-stack.yaml` 继续保持Codex-only。仓库另提供仅供owner本人使用的私有派生流程与专用模板 `templates/portainer-personal-stack.yaml`：
 
 ```text
 ghcr.io/wekingchen/codex-dev-personal-base
 ghcr.io/wekingchen/codex-dev-personal-remote
 ```
 
-私有镜像从配对的公开不可变digest派生，并通过固定Anthropic release key指纹、detached manifest signature、双架构checksum和size验证Claude Code native binary。`personal-remote`还会在每次workflow解析XTLS/Xray-core发布时间最新的非draft release（包含prerelease），将其固定为本次exact tag与双架构asset digest后安装；运行时由 `XRAY_PROXY_ENABLED=true|false` 启停Xray，启用时配置可选择全部代理的 `all-proxy`，或严格限制为“中国域名/IP直连、私网阻断、其他流量代理”的 `cn-direct`。节点配置只从宿主机root-only文件挂载。private package使用owner PAT而不是公开仓库`GITHUB_TOKEN`发布，并在candidate push前后和promotion前fail closed确认visibility为private且未关联repository。
+私有镜像从配对的公开不可变digest派生，并通过固定Anthropic release key指纹、detached manifest signature、双架构checksum和size验证Claude Code native binary。`personal-remote`还会在每次workflow解析XTLS/Xray-core发布时间最新的非draft release（包含prerelease），将其固定为本次exact tag与双架构asset digest后安装；运行时由 `XRAY_PROXY_ENABLED=true|false` 启停Xray。启用时可使用禁止任何 `freedom` outbound、未被其他非直连规则处理的流量默认使用第一个非直连outbound的 `all-proxy`，或严格限制为“私网阻断、中国域名/IP直连、其他未匹配流量代理”的 `cn-direct`。Xray固定以UID/GID 65532运行；配置必须恰好包含一个容器 `127.0.0.1:10809` HTTP inbound，所有inbound都只能监听loopback，且不发布宿主端口；Xray与sshd任一异常退出时容器整体fail closed。节点配置只从宿主机root-only文件挂载。private package使用owner PAT而不是公开仓库`GITHUB_TOKEN`发布，并在candidate push前后和promotion前fail closed确认visibility为private且未关联repository。
 
 本地覆盖私有镜像后，可以使用：
 
@@ -78,7 +78,7 @@ ghcr.io/wekingchen/codex-dev-personal-remote
 ./scripts/run.sh claude
 ```
 
-同一个 `/home/dev` 会分别持久化 `.codex`、`.claude` 和 `.claude.json`。可手动运行 `./scripts/audit-xray-private-supply-chain.sh --resolve-only` 查看当前将被构建的Xray最新exact release。完整的一次性GHCR bootstrap、GitHub Secrets、Portainer认证、代理开关、升级与回滚说明见：[`docs/PERSONAL-DUAL-CLI.md`](docs/PERSONAL-DUAL-CLI.md)。
+同一个 `/home/dev` 会分别持久化 `.codex`、`.claude` 和 `.claude.json`。stock `compose.remote.yaml`/`scripts/remote.sh` 只负责公开远程服务或personal双CLI镜像切换，不挂载Xray配置，也不传入 `XRAY_PROXY_ENABLED`；仓库提供的完整Xray部署路径是 `templates/portainer-personal-stack.yaml`。可手动运行 `./scripts/audit-xray-private-supply-chain.sh --resolve-only` 查看当前将被构建的Xray最新exact release。完整的一次性GHCR bootstrap、GitHub Secrets、Portainer认证、代理开关、升级与回滚说明见：[`docs/PERSONAL-DUAL-CLI.md`](docs/PERSONAL-DUAL-CLI.md)。
 
 > Claude Code是专有软件。该流程限定private、仅本人自用；自动门禁能验证private且未关联repository，但显式用户/Actions ACL仍需owner人工保持为空。不要向第三方分发镜像或共享Claude认证。
 
@@ -342,6 +342,8 @@ git push origin v0.1.0
 ./scripts/check-secrets.sh
 ./scripts/audit-supply-chain.sh
 ./scripts/audit-claude-private-supply-chain.sh
+./scripts/audit-xray-private-supply-chain.sh --static-only
+./scripts/audit-xray-private-supply-chain.sh --resolve-only
 bash -n scripts/*.sh
 shellcheck scripts/*.sh
 docker compose -f compose.yaml -f compose.remote.yaml --profile remote config

@@ -1,5 +1,7 @@
 # Portainer Standalone personal Stack：Codex + Claude Code + 可选Xray + SSH。
-# 部署前请阅读 docs/PERSONAL-DUAL-CLI.md，并创建全部bind mount源路径。
+# 部署前须同时阅读 docs/PORTAINER.md 与 docs/PERSONAL-DUAL-CLI.md。
+# 全部bind mount均为create_host_path:false；workspace、home、SSH、host key及Xray源必须预先存在。
+# Portainer root Console通常是非login shell，不自动加载动态代理环境；CLI真实验证请通过SSH dev会话。
 services:
   codex-ssh-hostkey-init:
     container_name: codex-ssh-hostkey-init
@@ -59,6 +61,7 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # 即使XRAY_PROXY_ENABLED=false，Docker仍要求此源文件存在；关闭模式只是不验证其内容。
       - type: bind
         source: /root/codex/xray/config.json
         target: /etc/xray/config.json
@@ -69,8 +72,10 @@ services:
       CODEX_HOME: /home/dev/.codex
       MISE_DATA_DIR: /home/dev/.local/share/mise
       MISE_CONFIG_DIR: /home/dev/.config/mise
-      # true：启动Xray；配置可为all-proxy或严格cn-direct（中国域名/IP直连、其他代理）。
-      # false：不启动Xray且全部直接联网。两种模式切换后都必须Recreate。
+      # true：启动Xray；all-proxy禁止freedom，未被其他非直连规则处理的流量使用首个非直连outbound，额外路由仍需审计。
+      # 严格cn-direct为私网阻断、中国域名/IP直连、其他未匹配流量代理。
+      # false：不启动Xray且CLI直接联网，但上面的config.json bind源仍必须存在。
+      # 两种模式切换都必须Update整个Stack/Recreate，Restart不会应用新的environment。
       XRAY_PROXY_ENABLED: "true"
       # 必须与宿主机workspace和dev-home的实际所有者一致，禁止使用0或65532。
       HOST_UID: "1000"

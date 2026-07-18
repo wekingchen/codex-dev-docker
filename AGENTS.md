@@ -63,10 +63,14 @@
 - 安装第三方工具不得执行未经校验的浮动远程 shell 脚本。
 - mise 必须固定官方 release，并分别校验 amd64、arm64 asset 的 SHA-256；两个架构必须在同一提交中更新。
 - Codex CLI 是明确例外：必须继续动态解析 `openai/codex` 官方 latest，并通过官方 installer 安装，不得在仓库中静态固定版本。
-- Claude Code只能进入owner本人使用的独立private GHCR package；公开base/remote package、Compose默认值和Portainer模板不得包含Claude二进制或指向private package。
+- Claude Code只能进入owner本人使用的独立private GHCR package；公开base/remote package、Compose默认值和公开模板 `templates/portainer-stack.yaml` 不得包含Claude二进制或指向private package。`templates/portainer-personal-stack.yaml` 是owner-only private package的明确例外。
 - Claude Code必须解析官方精确版本，固定release key指纹，验证`manifest.json.sig`与平台checksum/size；禁止执行浮动bootstrap或`curl | sh`。
 - GHCR visibility是package级而不是tag级；personal package必须用owner PAT发布、不得使用公开仓库`GITHUB_TOKEN`、不得关联或继承repository权限，并在candidate push前后和promotion前自动确认private且repository为空。GitHub API不能完整枚举显式用户与Actions ACL，owner还必须人工保持Manage access和Manage Actions access为空，不得把自动门禁描述为完整owner-only证明。
 - 镜像不得包含Claude登录态、API key、OAuth token或固定model；容器内更新必须关闭，由private镜像发布链管理版本。
+- Xray只能进入owner-only `personal-remote`；公开Compose和公开Portainer模板不得接入Xray。文档不得硬编码动态解析的Xray latest版本。
+- personal Xray固定使用UID/GID 65532，10809只能监听容器loopback且不得发布宿主端口；节点配置只能从宿主root-controlled文件只读挂载，Xray与sshd任一异常退出时容器必须fail closed。
+- 文档中的 `all-proxy` 只能表述为“无 `freedom` outbound，未被其他非直连规则处理的流量使用第一个非直连outbound”；严格 `cn-direct` 必须保持 `IPOnDemand`、私网优先阻断、仅中国域名/IP直连及freedom `finalRules`二次阻断。
+- personal Portainer文档必须说明关闭模式下bind源文件仍需存在、HOST_UID/HOST_GID不得使用65532、代理开关或Stack定义变化需Update Stack，而原子替换bind源文件必须force recreate，以及普通Portainer root Console不等于SSH `dev`登录环境。
 - provenance、SBOM 和漏洞扫描必须针对最终 registry candidate 根 digest，并在 promotion 前完成。
 - 未确认 OCI referrer 可达关系前，GHCR cleanup 必须继续保护所有 untagged versions。
 

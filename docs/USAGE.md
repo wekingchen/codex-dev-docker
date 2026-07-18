@@ -120,7 +120,7 @@ Base Trivy保持初始非阻断基线：报告HIGH/CRITICAL，但漏洞数量不
 
 ### 3.2 个人私有 Claude Code 派生镜像
 
-公开镜像、Compose默认值和Portainer模板始终保持Codex-only。本人需要双CLI时，在未跟踪 `.env` 中覆盖：
+公开镜像、Compose默认值和公开Portainer模板 `templates/portainer-stack.yaml` 始终保持Codex-only；owner-only `templates/portainer-personal-stack.yaml` 是使用private package的明确例外。本人需要双CLI时，在未跟踪 `.env` 中覆盖：
 
 ```dotenv
 CODEX_DEV_IMAGE=ghcr.io/wekingchen/codex-dev-personal-base:latest
@@ -128,6 +128,8 @@ CODEX_REMOTE_IMAGE=ghcr.io/wekingchen/codex-dev-personal-remote:latest
 ```
 
 私有流程验证Claude官方detached signature、双架构checksum/size和private package visibility，并沿用candidate digest、provenance、SBOM、Trivy与promotion门禁。首次visibility bootstrap、GitHub Secrets、GHCR登录、Portainer设置和许可边界见 [`PERSONAL-DUAL-CLI.md`](PERSONAL-DUAL-CLI.md)。
+
+上述 `.env` 覆盖只会让stock `compose.remote.yaml`/`scripts/remote.sh` 使用personal双CLI镜像；它们没有挂载Xray配置，也没有传入 `XRAY_PROXY_ENABLED`，因此不构成完整Xray部署。需要同容器Xray时，应使用owner-only `templates/portainer-personal-stack.yaml` 并按personal文档准备root-only配置。
 
 共享 `/home/dev` 同时持久化Codex `.codex` 与Claude `.claude`、`.claude.json`；重置home会同时删除两者的认证和状态。
 
@@ -389,6 +391,8 @@ shellcheck scripts/*.sh
 ./scripts/check-secrets.sh
 ./scripts/audit-supply-chain.sh
 ./scripts/audit-claude-private-supply-chain.sh
+./scripts/audit-xray-private-supply-chain.sh --static-only
+./scripts/audit-xray-private-supply-chain.sh --resolve-only
 git diff --check
 ```
 
