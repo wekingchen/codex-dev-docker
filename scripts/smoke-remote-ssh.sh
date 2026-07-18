@@ -509,15 +509,15 @@ docker exec \
     test "$(stat -c %U:%G /run/xray/config.json)" = root:xray
     test "$(stat -c %a /run/xray/config.json)" = 640
     test "$(/usr/local/bin/validate-xray-config.sh /run/xray/config.json)" = cn-direct
-    jq -e '
-      [.outbounds[].tag] == ["proxy", "direct", "block"] and
-      .routing.domainStrategy == "IPOnDemand" and
+    jq -e "
+      [.outbounds[].tag] == [\"proxy\", \"direct\", \"block\"] and
+      .routing.domainStrategy == \"IPOnDemand\" and
       .routing.rules == [
-        {"type":"field","ip":["geoip:private"],"outboundTag":"block"},
-        {"type":"field","domain":["geosite:cn"],"outboundTag":"direct"},
-        {"type":"field","ip":["geoip:cn"],"outboundTag":"direct"}
+        {\"type\":\"field\",\"ip\":[\"geoip:private\"],\"outboundTag\":\"block\"},
+        {\"type\":\"field\",\"domain\":[\"geosite:cn\"],\"outboundTag\":\"direct\"},
+        {\"type\":\"field\",\"ip\":[\"geoip:cn\"],\"outboundTag\":\"direct\"}
       ]
-    ' /run/xray/config.json >/dev/null
+    " /run/xray/config.json >/dev/null
     test "$(ps -o user= -C xray | awk "NF {print \$1; exit}")" = xray
     test "$(xray version | awk "NR == 1 {print \$2}")" = "$SMOKE_EXPECT_XRAY_VERSION"
     nc -z 127.0.0.1 10809

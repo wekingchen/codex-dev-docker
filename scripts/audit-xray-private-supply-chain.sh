@@ -179,17 +179,26 @@ asset_field() {
 resolve_latest_xray() {
   local releases_file="${TEMP_DIR}/releases.json"
   local release_file="${EVIDENCE_DIR}/release.json"
-  local tag version published_at prerelease release_count latest_count
+  local tag version published_at prerelease release_count latest_count github_token
   local arch asset_name digest_file_name digest size url digest_url sha256
+  local -a api_headers
 
   for command_name in curl jq grep; do
     require_command "$command_name"
   done
 
+  api_headers=(
+    -H 'Accept: application/vnd.github+json'
+    -H 'X-GitHub-Api-Version: 2022-11-28'
+  )
+  github_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  if [ -n "$github_token" ]; then
+    api_headers+=(-H "Authorization: Bearer $github_token")
+  fi
+
   curl --fail --location --silent --show-error --retry 3 \
     --proto '=https' --tlsv1.2 \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "${api_headers[@]}" \
     "$XRAY_RELEASES_API" --output "$releases_file"
   if ! jq -e 'type == "array" and length > 0' "$releases_file" >/dev/null; then
     echo "Xray releases API没有返回有效数组。" >&2
