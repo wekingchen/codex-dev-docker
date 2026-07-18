@@ -69,7 +69,7 @@ ghcr.io/wekingchen/codex-dev-personal-base
 ghcr.io/wekingchen/codex-dev-personal-remote
 ```
 
-私有镜像从配对的公开不可变digest派生，并通过固定Anthropic release key指纹、detached manifest signature、双架构checksum和size验证Claude Code native binary。`personal-remote`还会在每次workflow解析XTLS/Xray-core发布时间最新的非draft release（包含prerelease），将其固定为本次exact tag与双架构asset digest后安装；运行时由 `XRAY_PROXY_ENABLED=true|false` 选择代理或直接联网，节点配置只从宿主机root-only文件挂载。private package使用owner PAT而不是公开仓库`GITHUB_TOKEN`发布，并在candidate push前后和promotion前fail closed确认visibility为private且未关联repository。
+私有镜像从配对的公开不可变digest派生，并通过固定Anthropic release key指纹、detached manifest signature、双架构checksum和size验证Claude Code native binary。`personal-remote`还会在每次workflow解析XTLS/Xray-core发布时间最新的非draft release（包含prerelease），将其固定为本次exact tag与双架构asset digest后安装；运行时由 `XRAY_PROXY_ENABLED=true|false` 启停Xray，启用时配置可选择全部代理的 `all-proxy`，或严格限制为“中国域名/IP直连、私网阻断、其他流量代理”的 `cn-direct`。节点配置只从宿主机root-only文件挂载。private package使用owner PAT而不是公开仓库`GITHUB_TOKEN`发布，并在candidate push前后和promotion前fail closed确认visibility为private且未关联repository。
 
 本地覆盖私有镜像后，可以使用：
 

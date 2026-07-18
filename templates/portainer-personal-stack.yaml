@@ -69,7 +69,8 @@ services:
       CODEX_HOME: /home/dev/.codex
       MISE_DATA_DIR: /home/dev/.local/share/mise
       MISE_CONFIG_DIR: /home/dev/.config/mise
-      # true：启动Xray并向Codex/Claude注入HTTP代理；false：不启动Xray且直接联网。
+      # true：启动Xray；配置可为all-proxy或严格cn-direct（中国域名/IP直连、其他代理）。
+      # false：不启动Xray且全部直接联网。两种模式切换后都必须Recreate。
       XRAY_PROXY_ENABLED: "true"
       # 必须与宿主机workspace和dev-home的实际所有者一致，禁止使用0或65532。
       HOST_UID: "1000"

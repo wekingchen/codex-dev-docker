@@ -65,7 +65,7 @@ ghcr.io/wekingchen/codex-dev-personal-remote:latest
 ghcr.io/wekingchen/codex-dev-personal-remote@sha256:<remote-root-digest>
 ```
 
-personal-remote把Xray和sshd运行在同一容器中，Xray只监听容器 `127.0.0.1:10809`，宿主机仍只发布 `127.0.0.1:2222`。`XRAY_PROXY_ENABLED="true"` 启用代理，`"false"` 停用；真实节点配置从宿主机 `/root/codex/xray/config.json` 只读挂载，不能写入Stack environment。完整配置契约、目录权限和E2E见 [`PERSONAL-DUAL-CLI.md`](PERSONAL-DUAL-CLI.md)。PAT只保存在Portainer registry credential中；Claude登录保存在 `/root/codex/dev-home`。
+personal-remote把Xray和sshd运行在同一容器中，Xray只监听容器 `127.0.0.1:10809`，宿主机仍只发布 `127.0.0.1:2222`。`XRAY_PROXY_ENABLED="true"` 启用Xray，`"false"` 完全停用；启用时配置可选择无 `freedom` 的 `all-proxy`，或严格的 `cn-direct`（中国域名/IP直连、私网阻断、其他流量代理）。真实节点配置从宿主机 `/root/codex/xray/config.json` 只读挂载，不能写入Stack environment。完整配置契约、目录权限和E2E见 [`PERSONAL-DUAL-CLI.md`](PERSONAL-DUAL-CLI.md)。PAT只保存在Portainer registry credential中；Claude登录保存在 `/root/codex/dev-home`。
 
 ### `codex-ssh-hostkey-init`
 
@@ -145,6 +145,8 @@ chmod 0700 /root/codex/xray
 chown root:root /root/codex/xray/config.json
 chmod 0600 /root/codex/xray/config.json
 ```
+
+中国分流配置不能简单添加宽泛的 `freedom`。严格 `cn-direct` 档案要求outbounds精确按 `proxy`、`direct`、`block` 排列，routing rules精确按 `geoip:private -> block`、`geosite:cn -> direct`、`geoip:cn -> direct` 排列，routing `domainStrategy`为 `IPOnDemand`，并由freedom `finalRules`再次阻断 `geoip:private`；其他未匹配流量默认使用第一个proxy。任何额外direct规则、catch-all direct、balancer或间接dialer引用都会使容器fail closed拒绝启动。完整JSON见 [`PERSONAL-DUAL-CLI.md`](PERSONAL-DUAL-CLI.md)。
 
 如果宿主机实际使用其他非零 UID/GID，应同时修改目录所有权和 Stack 中的：
 
@@ -705,6 +707,7 @@ docker logs --tail=200 codex-ssh
 - `/root/codex/ssh/authorized_keys` 不存在或格式错误。
 - workspace/home/host-key目录未提前创建。
 - `HOST_UID/HOST_GID` 与宿主机目录所有权不一致。
+- Xray配置权限不是root-only，或 `cn-direct` 的outbound/routing顺序和内容不符合严格契约。
 - `2222` 已被其他宿主机进程占用。
 
 ### WinSCP 无法连接 `127.0.0.1`
@@ -760,6 +763,7 @@ docker pull ghcr.io/wekingchen/codex-dev-remote:latest
 - [ ] workspace与dev-home由非零UID/GID拥有。
 - [ ] Stack没有挂载Docker socket、宿主私钥或宿主根目录。
 - [ ] personal代理开启时，Xray配置为root-only、inbound只监听容器loopback，宿主机没有10809映射。
+- [ ] 使用 `cn-direct` 时，私网已阻断、中国域名/IP直连、其他流量代理，且没有额外direct规则或balancer。
 - [ ] `XRAY_PROXY_ENABLED` 只使用严格的 `"true"` 或 `"false"`，切换后已Recreate并验证对应出口。
 - [ ] 每次更新前都已记录当前运行镜像的 repository digest。
 - [ ] 更新镜像时使用Re-pull并重建，而不是仅Restart。

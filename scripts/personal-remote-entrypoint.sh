@@ -95,7 +95,7 @@ append_proxy_to_sshd_setenv() {
 }
 
 validate_xray_config_source() {
-  local mode
+  local mode routing_policy
 
   if [ ! -f "$XRAY_CONFIG_SOURCE" ] || [ -L "$XRAY_CONFIG_SOURCE" ]; then
     echo "代理已启用但Xray配置缺失、不是普通文件或是符号链接：$XRAY_CONFIG_SOURCE" >&2
@@ -108,22 +108,10 @@ validate_xray_config_source() {
     exit 1
   fi
 
-  if ! jq -e '
-    type == "object" and
-    (.log | type == "object") and
-    .log.access == "none" and
-    (.log.loglevel == "warning" or .log.loglevel == "error" or .log.loglevel == "none") and
-    ((.log.dnsLog // false) != true) and
-    (.inbounds | type == "array" and length > 0) and
-    all(.inbounds[]; (.listen == "127.0.0.1" or .listen == "::1")) and
-    any(.inbounds[]; (.protocol == "http" and .listen == "127.0.0.1" and .port == 10809)) and
-    (.outbounds | type == "array" and length > 0) and
-    (.outbounds[0].protocol != "freedom" and .outbounds[0].protocol != "blackhole") and
-    all(.outbounds[]; .protocol != "freedom")
-  ' "$XRAY_CONFIG_SOURCE" >/dev/null; then
-    echo "Xray配置不符合loopback HTTP inbound、关闭access log及无Freedom fallback的安全契约。" >&2
+  if ! routing_policy="$(/usr/local/bin/validate-xray-config.sh "$XRAY_CONFIG_SOURCE")"; then
     exit 1
   fi
+  printf 'Xray路由策略验证通过：%s\n' "$routing_policy"
 }
 
 install_xray_runtime_config() {

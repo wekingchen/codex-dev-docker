@@ -26,7 +26,8 @@ WORKSPACE_DIR="${TEMP_DIR}/workspace"
 CLIENT_KEY="${TEMP_DIR}/client_ed25519"
 WRONG_KEY="${TEMP_DIR}/wrong_ed25519"
 KNOWN_HOSTS="${TEMP_DIR}/known_hosts"
-XRAY_CONFIG="${TEMP_DIR}/xray-config.json"
+XRAY_CONFIG="${TEMP_DIR}/xray-cn-direct.json"
+XRAY_ALL_PROXY_CONFIG="${TEMP_DIR}/xray-all-proxy.json"
 XRAY_PROXY_ENABLED_FOR_RUN=false
 SSH_PORT=""
 
@@ -58,7 +59,7 @@ cat > "$XRAY_CONFIG" <<'EOF'
   ],
   "outbounds": [
     {
-      "tag": "unreachable-test-proxy",
+      "tag": "proxy",
       "protocol": "socks",
       "settings": {
         "servers": [
@@ -68,15 +69,51 @@ cat > "$XRAY_CONFIG" <<'EOF'
           }
         ]
       }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "UseIP",
+        "finalRules": [
+          {
+            "action": "block",
+            "ip": ["geoip:private"]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole",
+      "settings": {}
     }
   ],
   "routing": {
-    "domainStrategy": "AsIs",
-    "rules": []
+    "domainStrategy": "IPOnDemand",
+    "rules": [
+      {
+        "type": "field",
+        "ip": ["geoip:private"],
+        "outboundTag": "block"
+      },
+      {
+        "type": "field",
+        "domain": ["geosite:cn"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "ip": ["geoip:cn"],
+        "outboundTag": "direct"
+      }
+    ]
   }
 }
 EOF
-chmod 0600 "$XRAY_CONFIG"
+jq '.outbounds = [.outbounds[0]] | .routing = {"domainStrategy": "AsIs", "rules": []}' \
+  "$XRAY_CONFIG" > "$XRAY_ALL_PROXY_CONFIG"
+chmod 0600 "$XRAY_CONFIG" "$XRAY_ALL_PROXY_CONFIG"
 docker volume create "$HOME_VOLUME" >/dev/null
 docker volume create "$HOST_KEY_VOLUME" >/dev/null
 
@@ -157,11 +194,60 @@ ssh_run() {
     "${REMOTE_USER}@127.0.0.1" "$@"
 }
 
+validate_xray_policy() {
+  local config_file="$1"
+  local expected_policy="$2"
+  local actual_policy
+
+  actual_policy="$(docker run --rm --platform "$PLATFORM" \
+    --entrypoint /usr/local/bin/validate-xray-config.sh \
+    --volume "$config_file:/config.json:ro" \
+    "$REMOTE_IMAGE" /config.json)"
+  if [ "$actual_policy" != "$expected_policy" ]; then
+    echo "Xray配置策略识别错误：期望$expected_policy，实际$actual_policy" >&2
+    exit 1
+  fi
+}
+
+expect_xray_policy_rejected() {
+  local name="$1"
+  local filter="$2"
+  local invalid_config="${TEMP_DIR}/xray-invalid-${name}.json"
+
+  jq "$filter" "$XRAY_CONFIG" > "$invalid_config"
+  chmod 0600 "$invalid_config"
+  if docker run --rm --platform "$PLATFORM" \
+    --entrypoint /usr/local/bin/validate-xray-config.sh \
+    --volume "$invalid_config:/config.json:ro" \
+    "$REMOTE_IMAGE" /config.json >/dev/null 2>&1; then
+    echo "Xray不安全配置不应通过验证：$name" >&2
+    exit 1
+  fi
+}
+
 if [ -n "$EXPECTED_XRAY_VERSION" ]; then
   if ! [[ "$EXPECTED_XRAY_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
     echo "启用Xray smoke时必须提供有效的EXPECTED_XRAY_SHA256。" >&2
     exit 1
   fi
+
+  validate_xray_policy "$XRAY_ALL_PROXY_CONFIG" all-proxy
+  validate_xray_policy "$XRAY_CONFIG" cn-direct
+  expect_xray_policy_rejected freedom-default '.outbounds = [.outbounds[1], .outbounds[0], .outbounds[2]]'
+  expect_xray_policy_rejected freedom-wrong-tag '.outbounds[1].tag = "bypass"'
+  expect_xray_policy_rejected multiple-freedom '.outbounds += [{"tag":"direct2","protocol":"freedom","settings":{"domainStrategy":"UseIP"}}]'
+  expect_xray_policy_rejected missing-block '.outbounds |= map(select(.tag != "block"))'
+  expect_xray_policy_rejected duplicate-tag '.outbounds[2].tag = "direct"'
+  expect_xray_policy_rejected wrong-domain-strategy '.routing.domainStrategy = "AsIs"'
+  expect_xray_policy_rejected missing-final-private-block '.outbounds[1].settings |= del(.finalRules)'
+  expect_xray_policy_rejected wrong-final-private-block '.outbounds[1].settings.finalRules[0].ip = ["geoip:cn"]'
+  expect_xray_policy_rejected private-block-order '.routing.rules = [.routing.rules[1], .routing.rules[0], .routing.rules[2]]'
+  expect_xray_policy_rejected private-direct '.routing.rules[0].outboundTag = "direct"'
+  expect_xray_policy_rejected broad-domain '.routing.rules[1].domain = ["geosite:geolocation-!cn"]'
+  expect_xray_policy_rejected broad-ip '.routing.rules[2].ip = ["0.0.0.0/0"]'
+  expect_xray_policy_rejected extra-direct-rule '.routing.rules += [{"type":"field","network":"tcp,udp","outboundTag":"direct"}]'
+  expect_xray_policy_rejected direct-balancer '.routing.balancers = [{"tag":"direct-balancer","selector":["direct"]}]'
+  expect_xray_policy_rejected direct-dialer '.outbounds[0].streamSettings.sockopt.dialerProxy = "direct"'
 
   if docker run --rm --platform "$PLATFORM" \
     --env XRAY_PROXY_ENABLED=invalid \
@@ -422,6 +508,16 @@ docker exec \
     test "$(stat -c %a /usr/local/bin/xray)" = 755
     test "$(stat -c %U:%G /run/xray/config.json)" = root:xray
     test "$(stat -c %a /run/xray/config.json)" = 640
+    test "$(/usr/local/bin/validate-xray-config.sh /run/xray/config.json)" = cn-direct
+    jq -e '
+      [.outbounds[].tag] == ["proxy", "direct", "block"] and
+      .routing.domainStrategy == "IPOnDemand" and
+      .routing.rules == [
+        {"type":"field","ip":["geoip:private"],"outboundTag":"block"},
+        {"type":"field","domain":["geosite:cn"],"outboundTag":"direct"},
+        {"type":"field","ip":["geoip:cn"],"outboundTag":"direct"}
+      ]
+    ' /run/xray/config.json >/dev/null
     test "$(ps -o user= -C xray | awk "NF {print \$1; exit}")" = xray
     test "$(xray version | awk "NR == 1 {print \$2}")" = "$SMOKE_EXPECT_XRAY_VERSION"
     nc -z 127.0.0.1 10809

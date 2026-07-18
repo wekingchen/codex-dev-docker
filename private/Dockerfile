@@ -156,6 +156,7 @@ COPY --from=xray-fetch --chown=0:0 --chmod=0755 /opt/xray/bin/xray /usr/local/bi
 COPY --from=xray-fetch --chown=0:0 --chmod=0644 /opt/xray/share/geoip.dat /opt/xray/share/geosite.dat /usr/local/share/xray/
 COPY --from=xray-fetch --chown=0:0 --chmod=0644 /opt/xray/share/LICENSE /usr/local/share/licenses/xray-core/LICENSE
 COPY --chmod=0755 scripts/remote-entrypoint.sh /usr/local/bin/remote-entrypoint.sh
+COPY --chmod=0755 scripts/validate-xray-config.sh /usr/local/bin/validate-xray-config.sh
 COPY --chmod=0755 scripts/personal-remote-entrypoint.sh /usr/local/bin/personal-remote-entrypoint.sh
 COPY --chmod=0755 scripts/personal-remote-healthcheck.sh /usr/local/bin/personal-remote-healthcheck.sh
 COPY --chmod=0644 private/codex-xray-proxy.sh /etc/profile.d/codex-xray-proxy.sh
