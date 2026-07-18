@@ -14,6 +14,8 @@ BASE_IMAGE="${5:-}"
 REMOTE_USER="${6:-dev}"
 EXPECTED_CLAUDE_VERSION="${EXPECTED_CLAUDE_VERSION:-}"
 EXPECTED_CLAUDE_SHA256="${EXPECTED_CLAUDE_SHA256:-}"
+EXPECTED_XRAY_VERSION="${EXPECTED_XRAY_VERSION:-}"
+EXPECTED_XRAY_SHA256="${EXPECTED_XRAY_SHA256:-}"
 REMOTE_HOME="/home/${REMOTE_USER}"
 TEST_ID="codex-remote-smoke-$$-${RANDOM:-0}"
 CONTAINER_NAME="${TEST_ID}"
@@ -24,6 +26,8 @@ WORKSPACE_DIR="${TEMP_DIR}/workspace"
 CLIENT_KEY="${TEMP_DIR}/client_ed25519"
 WRONG_KEY="${TEMP_DIR}/wrong_ed25519"
 KNOWN_HOSTS="${TEMP_DIR}/known_hosts"
+XRAY_CONFIG="${TEMP_DIR}/xray-config.json"
+XRAY_PROXY_ENABLED_FOR_RUN=false
 SSH_PORT=""
 
 cleanup() {
@@ -36,6 +40,43 @@ trap cleanup EXIT
 mkdir -p "$WORKSPACE_DIR"
 ssh-keygen -q -t ed25519 -N '' -C 'codex-remote-smoke' -f "$CLIENT_KEY"
 ssh-keygen -q -t ed25519 -N '' -C 'codex-remote-wrong-key' -f "$WRONG_KEY"
+cat > "$XRAY_CONFIG" <<'EOF'
+{
+  "log": {
+    "access": "none",
+    "loglevel": "warning",
+    "dnsLog": false
+  },
+  "inbounds": [
+    {
+      "tag": "local-http",
+      "listen": "127.0.0.1",
+      "port": 10809,
+      "protocol": "http",
+      "settings": {}
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "unreachable-test-proxy",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "127.0.0.1",
+            "port": 9
+          }
+        ]
+      }
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": []
+  }
+}
+EOF
+chmod 0600 "$XRAY_CONFIG"
 docker volume create "$HOME_VOLUME" >/dev/null
 docker volume create "$HOST_KEY_VOLUME" >/dev/null
 
@@ -50,18 +91,29 @@ volume_fingerprint="$(docker run --rm --platform "$PLATFORM" \
   "$REMOTE_IMAGE" -l -E sha256 -f /keys/ssh_host_ed25519_key.pub | awk '{print $2}')"
 
 start_remote() {
-  docker run -d --platform "$PLATFORM" \
-    --name "$CONTAINER_NAME" \
-    --publish 127.0.0.1::2222 \
-    --volume "$HOME_VOLUME:$REMOTE_HOME" \
-    --volume "$HOST_KEY_VOLUME:/etc/ssh/codex-host-keys:ro" \
-    --volume "$CLIENT_KEY.pub:/etc/codex-ssh/authorized_keys.input:ro" \
-    --volume "$WORKSPACE_DIR:/workspace" \
-    --tmpfs /run:rw,nosuid,nodev,mode=0755 \
-    --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
-    --env "HOST_UID=$(id -u)" \
-    --env "HOST_GID=$(id -g)" \
-    "$REMOTE_IMAGE" >/dev/null
+  local -a docker_args
+  docker_args=(
+    run -d --platform "$PLATFORM"
+    --name "$CONTAINER_NAME"
+    --publish 127.0.0.1::2222
+    --volume "$HOME_VOLUME:$REMOTE_HOME"
+    --volume "$HOST_KEY_VOLUME:/etc/ssh/codex-host-keys:ro"
+    --volume "$CLIENT_KEY.pub:/etc/codex-ssh/authorized_keys.input:ro"
+    --volume "$WORKSPACE_DIR:/workspace"
+    --tmpfs /run:rw,nosuid,nodev,mode=0755
+    --tmpfs /tmp:rw,nosuid,nodev,mode=1777
+    --env "HOST_UID=$(id -u)"
+    --env "HOST_GID=$(id -g)"
+  )
+
+  if [ -n "$EXPECTED_XRAY_VERSION" ]; then
+    docker_args+=(--env "XRAY_PROXY_ENABLED=$XRAY_PROXY_ENABLED_FOR_RUN")
+    if [ "$XRAY_PROXY_ENABLED_FOR_RUN" = true ]; then
+      docker_args+=(--volume "$XRAY_CONFIG:/etc/xray/config.json:ro")
+    fi
+  fi
+
+  docker "${docker_args[@]}" "$REMOTE_IMAGE" >/dev/null
 
   SSH_PORT="$(docker port "$CONTAINER_NAME" 2222/tcp | awk -F: 'NR == 1 {print $NF}')"
   if [ -z "$SSH_PORT" ]; then
@@ -104,6 +156,67 @@ ssh_run() {
     -o PreferredAuthentications=publickey \
     "${REMOTE_USER}@127.0.0.1" "$@"
 }
+
+if [ -n "$EXPECTED_XRAY_VERSION" ]; then
+  if ! [[ "$EXPECTED_XRAY_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "启用Xray smoke时必须提供有效的EXPECTED_XRAY_SHA256。" >&2
+    exit 1
+  fi
+
+  if docker run --rm --platform "$PLATFORM" \
+    --env XRAY_PROXY_ENABLED=invalid \
+    "$REMOTE_IMAGE" >/dev/null 2>&1; then
+    echo "无效XRAY_PROXY_ENABLED不应允许personal-remote启动。" >&2
+    exit 1
+  fi
+
+  if docker run --rm --platform "$PLATFORM" \
+    --env HOST_UID=1000 \
+    --env HOST_GID=65532 \
+    "$REMOTE_IMAGE" >/dev/null 2>&1; then
+    echo "personal-remote不应允许HOST_UID/HOST_GID占用Xray保留身份65532。" >&2
+    exit 1
+  fi
+
+  if docker run --rm --platform "$PLATFORM" \
+    --env HTTP_PROXY=http://untrusted-proxy.invalid:8080 \
+    "$REMOTE_IMAGE" >/dev/null 2>&1; then
+    echo "personal-remote不应接受绕过XRAY_PROXY_ENABLED的外部代理环境。" >&2
+    exit 1
+  fi
+
+  if docker run --rm --platform "$PLATFORM" \
+    --volume "$HOME_VOLUME:$REMOTE_HOME" \
+    --volume "$HOST_KEY_VOLUME:/etc/ssh/codex-host-keys:ro" \
+    --volume "$CLIENT_KEY.pub:/etc/codex-ssh/authorized_keys.input:ro" \
+    --volume "$WORKSPACE_DIR:/workspace" \
+    --tmpfs /run:rw,nosuid,nodev,mode=0755 \
+    --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+    --env "HOST_UID=$(id -u)" \
+    --env "HOST_GID=$(id -g)" \
+    --env XRAY_PROXY_ENABLED=true \
+    --env XRAY_CONFIG_SOURCE=/etc/xray/missing.json \
+    "$REMOTE_IMAGE" >/dev/null 2>&1; then
+    echo "启用代理但缺少Xray配置时不应启动personal-remote。" >&2
+    exit 1
+  fi
+
+  XRAY_PROXY_ENABLED_FOR_RUN=false
+  start_remote
+  wait_for_ssh
+  ssh_run 'set -euo pipefail; test -z "${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}${NO_PROXY:-}${http_proxy:-}${https_proxy:-}${all_proxy:-}${no_proxy:-}"'
+  docker exec "$CONTAINER_NAME" bash -lc '
+    set -euo pipefail
+    runtime_config=/run/codex-ssh/sshd_config
+    ! pgrep -x xray >/dev/null
+    ! nc -z 127.0.0.1 10809 >/dev/null 2>&1
+    test -z "${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}${NO_PROXY:-}${http_proxy:-}${https_proxy:-}${all_proxy:-}${no_proxy:-}"
+    test "$(grep -Ec "^SetEnv[[:space:]]+" "$runtime_config")" -eq 1
+    ! grep -Eiq "(^|[[:space:]])(HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy)=" "$runtime_config"
+  '
+  docker rm -f "$CONTAINER_NAME" >/dev/null
+  XRAY_PROXY_ENABLED_FOR_RUN=true
+fi
 
 start_remote
 wait_for_ssh
@@ -154,13 +267,25 @@ if [ -n "${SMOKE_EXPECT_CLAUDE_VERSION:-}" ]; then
   printf "CLAUDE_SHA256=%s\n" "$claude_sha256"
 fi
 
+if [ -n "${SMOKE_EXPECT_XRAY_VERSION:-}" ]; then
+  test "${HTTP_PROXY:-}" = http://127.0.0.1:10809
+  test "${HTTPS_PROXY:-}" = http://127.0.0.1:10809
+  test "${NO_PROXY:-}" = localhost,127.0.0.1,::1
+  test "${http_proxy:-}" = http://127.0.0.1:10809
+  test "${https_proxy:-}" = http://127.0.0.1:10809
+  test "${no_proxy:-}" = localhost,127.0.0.1,::1
+  test -z "${ALL_PROXY:-}${all_proxy:-}"
+  xray_output="$(xray version | sed -n '1p')"
+  printf "XRAY_VERSION=%s\n" "$(awk '{print $2}' <<< "$xray_output")"
+fi
+
 printf "USER_ID=%s:%s\n" "$(id -u)" "$(id -g)"
 printf "ARCH=%s\n" "$(uname -m)"
 test -z "${SSH_AUTH_SOCK:-}"
 EOF
 )"
 printf -v remote_check_quoted '%q' "$remote_check_script"
-if ! output="$(ssh_run "EXPECTED_UID=$(id -u) EXPECTED_GID=$(id -g) EXPECTED_HOME=$REMOTE_HOME SMOKE_EXPECT_CLAUDE_VERSION=$EXPECTED_CLAUDE_VERSION bash -lc $remote_check_quoted")"; then
+if ! output="$(ssh_run "EXPECTED_UID=$(id -u) EXPECTED_GID=$(id -g) EXPECTED_HOME=$REMOTE_HOME SMOKE_EXPECT_CLAUDE_VERSION=$EXPECTED_CLAUDE_VERSION SMOKE_EXPECT_XRAY_VERSION=$EXPECTED_XRAY_VERSION bash -lc $remote_check_quoted")"; then
   docker logs "$CONTAINER_NAME" >&2 || true
   echo "正确公钥无法完成remote SSH smoke。" >&2
   exit 1
@@ -171,6 +296,7 @@ actual_version="$(awk -F= '$1 == "CODEX_VERSION" {print $2; exit}' <<< "$output"
 actual_mise_version="$(awk -F= '$1 == "MISE_VERSION" {print $2; exit}' <<< "$output")"
 actual_claude_version="$(awk -F= '$1 == "CLAUDE_VERSION" {print $2; exit}' <<< "$output")"
 actual_claude_sha256="$(awk -F= '$1 == "CLAUDE_SHA256" {print $2; exit}' <<< "$output")"
+actual_xray_version="$(awk -F= '$1 == "XRAY_VERSION" {print $2; exit}' <<< "$output")"
 actual_arch="$(awk -F= '$1 == "ARCH" {print $2; exit}' <<< "$output")"
 
 if [ -z "$actual_version" ] || { [ "$EXPECTED_VERSION" != latest ] && [ "$actual_version" != "$EXPECTED_VERSION" ]; }; then
@@ -196,6 +322,25 @@ if [ -n "$EXPECTED_CLAUDE_VERSION" ]; then
 
   if [ "$actual_claude_sha256" != "$EXPECTED_CLAUDE_SHA256" ]; then
     echo "Claude Code SHA-256不匹配：期望$EXPECTED_CLAUDE_SHA256，实际${actual_claude_sha256:-<无法读取>}" >&2
+    exit 1
+  fi
+fi
+
+if [ -n "$EXPECTED_XRAY_VERSION" ]; then
+  if [ "$actual_xray_version" != "$EXPECTED_XRAY_VERSION" ]; then
+    echo "Xray版本不匹配：期望$EXPECTED_XRAY_VERSION，实际${actual_xray_version:-<无法读取>}" >&2
+    exit 1
+  fi
+
+  xray_label_version="$(docker inspect "$CONTAINER_NAME" --format '{{ index .Config.Labels "io.codex-dev.xray.version" }}')"
+  case "$PLATFORM" in
+    linux/amd64) xray_digest_label='io.codex-dev.xray.sha256-amd64' ;;
+    linux/arm64) xray_digest_label='io.codex-dev.xray.sha256-arm64' ;;
+    *) echo "不支持的Xray smoke平台：$PLATFORM" >&2; exit 1 ;;
+  esac
+  xray_label_sha256="$(docker inspect "$CONTAINER_NAME" --format "{{ index .Config.Labels \"$xray_digest_label\" }}")"
+  if [ "$xray_label_version" != "$EXPECTED_XRAY_VERSION" ] || [ "$xray_label_sha256" != "$EXPECTED_XRAY_SHA256" ]; then
+    echo "Xray OCI label不匹配：version=${xray_label_version:-<空>} sha256=${xray_label_sha256:-<空>}" >&2
     exit 1
   fi
 fi
@@ -234,6 +379,7 @@ fi
 docker exec \
   --env "EXPECTED_HOME=$REMOTE_HOME" \
   --env "SMOKE_EXPECT_CLAUDE_VERSION=$EXPECTED_CLAUDE_VERSION" \
+  --env "SMOKE_EXPECT_XRAY_VERSION=$EXPECTED_XRAY_VERSION" \
   "$CONTAINER_NAME" bash -lc '
   set -euo pipefail
   runtime_config=/run/codex-ssh/sshd_config
@@ -251,6 +397,17 @@ docker exec \
     expected_setenv+=" DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
     expected_tokens+=("DISABLE_AUTOUPDATER=1" "DISABLE_UPDATES=1")
   fi
+  if [ -n "$SMOKE_EXPECT_XRAY_VERSION" ]; then
+    expected_setenv+=" HTTP_PROXY=http://127.0.0.1:10809 HTTPS_PROXY=http://127.0.0.1:10809 NO_PROXY=localhost,127.0.0.1,::1 http_proxy=http://127.0.0.1:10809 https_proxy=http://127.0.0.1:10809 no_proxy=localhost,127.0.0.1,::1"
+    expected_tokens+=(
+      "HTTP_PROXY=http://127.0.0.1:10809"
+      "HTTPS_PROXY=http://127.0.0.1:10809"
+      "NO_PROXY=localhost,127.0.0.1,::1"
+      "http_proxy=http://127.0.0.1:10809"
+      "https_proxy=http://127.0.0.1:10809"
+      "no_proxy=localhost,127.0.0.1,::1"
+    )
+  fi
   test "$(grep -E "^SetEnv[[:space:]]+" "$runtime_config")" = "$expected_setenv"
 
   effective="$(/usr/sbin/sshd -T -f "$runtime_config")"
@@ -258,6 +415,23 @@ docker exec \
   for expected_token in "${expected_tokens[@]}"; do
     grep -Fqx "setenv $expected_token" <<< "$effective"
   done
+
+  if [ -n "$SMOKE_EXPECT_XRAY_VERSION" ]; then
+    test "$(stat -c %U:%G /usr/local/bin/xray)" = root:root
+    test "$(stat -c %a /usr/local/bin/xray)" = 755
+    test "$(stat -c %U:%G /run/xray/config.json)" = root:xray
+    test "$(stat -c %a /run/xray/config.json)" = 640
+    test "$(ps -o user= -C xray | awk 'NF {print $1; exit}')" = xray
+    test "$(xray version | awk 'NR == 1 {print $2}')" = "$SMOKE_EXPECT_XRAY_VERSION"
+    nc -z 127.0.0.1 10809
+    listeners="$(ss -H -lnt 'sport = :10809')"
+    test -n "$listeners"
+    ! grep -Eq '(^|[[:space:]])(0\.0\.0\.0|\[?::\]?):10809([[:space:]]|$)' <<< "$listeners"
+    test "$HTTP_PROXY" = http://127.0.0.1:10809
+    test "$HTTPS_PROXY" = http://127.0.0.1:10809
+    test "$NO_PROXY" = localhost,127.0.0.1,::1
+    test -z "${ALL_PROXY:-}${all_proxy:-}"
+  fi
 
   grep -qx "permitrootlogin no" <<< "$effective"
   grep -qx "passwordauthentication no" <<< "$effective"
@@ -299,6 +473,21 @@ if [ -n "$EXPECTED_CLAUDE_VERSION" ]; then
   ssh_run "test -f '$REMOTE_HOME/.claude/remote-smoke-persist'"
 fi
 
+if [ -n "$EXPECTED_XRAY_VERSION" ]; then
+  docker exec "$CONTAINER_NAME" pkill -TERM -x xray
+  for _attempt in $(seq 1 30); do
+    if [ "$(docker inspect "$CONTAINER_NAME" --format '{{.State.Running}}')" = false ]; then
+      break
+    fi
+    sleep 1
+  done
+  if [ "$(docker inspect "$CONTAINER_NAME" --format '{{.State.Running}}')" != false ]; then
+    docker logs "$CONTAINER_NAME" >&2 || true
+    echo "终止Xray后personal-remote容器没有fail closed退出。" >&2
+    exit 1
+  fi
+fi
+
 if [ -n "$BASE_IMAGE" ]; then
   docker rm -f "$CONTAINER_NAME" >/dev/null
   docker run --rm --platform "$PLATFORM" \
@@ -306,7 +495,9 @@ if [ -n "$BASE_IMAGE" ]; then
     "$BASE_IMAGE" true
 fi
 
-if [ -n "$EXPECTED_CLAUDE_VERSION" ]; then
+if [ -n "$EXPECTED_XRAY_VERSION" ]; then
+  echo "remote SSH smoke通过：$REMOTE_IMAGE ($PLATFORM, Codex $actual_version, Claude Code $actual_claude_version, Xray $actual_xray_version, mise $actual_mise_version, proxy on/off)"
+elif [ -n "$EXPECTED_CLAUDE_VERSION" ]; then
   echo "remote SSH smoke通过：$REMOTE_IMAGE ($PLATFORM, Codex $actual_version, Claude Code $actual_claude_version, mise $actual_mise_version)"
 else
   echo "remote SSH smoke通过：$REMOTE_IMAGE ($PLATFORM, Codex $actual_version, mise $actual_mise_version)"

@@ -25,7 +25,7 @@ ghcr.io/wekingchen/codex-dev-personal-remote
 
 ## 1. 架构与状态目录
 
-私有镜像从同一次公开发布的不可变 base/remote 根 digest 派生，再加入经过官方签名 manifest 和 SHA-256 验证的 Claude Code native binary。
+私有镜像从同一次公开发布的不可变 base/remote 根 digest 派生，再加入经过官方签名 manifest 和 SHA-256 验证的 Claude Code native binary。`personal-remote` 还会在每次 workflow 中解析 XTLS/Xray-core 发布时间最新的非draft release（包含prerelease），把它固定为本次构建的exact tag、双架构asset digest和size后安装；`personal-base`不包含Xray。
 
 ```text
 公开 codex-dev-base@sha256:...
@@ -33,6 +33,8 @@ ghcr.io/wekingchen/codex-dev-personal-remote
 
 公开 codex-dev-remote@sha256:...
   └── codex-dev-personal-remote
+      ├── claude
+      └── xray（运行时可开关）
 ```
 
 容器结构不变：
@@ -43,7 +45,7 @@ ghcr.io/wekingchen/codex-dev-personal-remote
 - Claude Code主要状态：`/home/dev/.claude`
 - Claude Code其他用户状态：`/home/dev/.claude.json`
 
-不增加第二个 Compose service、第二个 SSH 端口或第二个 home volume。两个 CLI 共享 Git、mise、shell配置、项目文件和缓存，但认证目录彼此独立。
+不增加第二个 Compose service、第二个 SSH 端口或第二个 home volume。`personal-remote`在同一个容器内按开关运行Xray与sshd，Xray HTTP inbound只监听容器loopback `127.0.0.1:10809`，不发布宿主端口。两个 CLI 共享 Git、mise、shell配置、项目文件和缓存，但认证目录彼此独立。
 
 私有镜像设置：
 
@@ -79,6 +81,18 @@ bootstrap.sh
 7. 安装为root-owned `0755` 的 `/usr/local/bin/claude`。
 8. 双架构分别执行本地和registry smoke、provenance、SBOM与Trivy检查。
 9. promotion前重新确认公开父digest、Claude latest/signature和private visibility均未漂移。
+
+### Xray latest供应链
+
+Xray不是按固定版本长期构建，也不直接使用浮动 `latest` tag。每次personal workflow会：
+
+1. 查询 `XTLS/Xray-core` releases API列表。
+2. 选择 `draft=false` 且 `published_at` 最新的release，包含官方标记为prerelease的版本；截至2026-07-18应解析为 `v26.7.11`。
+3. 从该exact tag读取 `Xray-linux-64.zip`、`Xray-linux-arm64-v8a.zip` 的GitHub asset SHA-256与size。
+4. 交叉检查同名 `.dgst`，再由Docker构建层下载exact URL并核对SHA-256与size。
+5. promotion前重新解析最新release；构建期间如出现更新版本，本次candidate不移动正式标签。
+
+Xray release没有独立的binary detached signature；`.dgst`只是同一release中的哈希清单。发布证据会如实记录这一信任边界，不能把它描述为“已验签”。
 
 ## 3. 一次性准备 GitHub Secrets
 
@@ -138,7 +152,7 @@ GitHub当前API不能完整枚举Package Settings中的显式用户授权和Mana
 首次不能直接推送含Claude的镜像。先运行：
 
 ```text
-Actions → 构建私有 Codex + Claude personal 镜像 → Run workflow
+Actions → 构建私有 Codex + Claude + Xray personal 镜像 → Run workflow
 mode: bootstrap
 promote: false
 ```
@@ -305,24 +319,152 @@ Registries → Add registry → Custom registry
 
 如果账号或组织启用了SSO，还需为PAT完成SSO授权。
 
-不要修改仓库公开模板。复制现有Stack为本人私有版本，只把两处image同时替换为：
+不要修改仓库公开模板。直接复制私有专用模板：
+
+```text
+templates/portainer-personal-stack.yaml
+```
+
+其中 `codex-ssh-hostkey-init` 与 `codex-ssh` 已同时使用：
 
 ```yaml
 image: ghcr.io/wekingchen/codex-dev-personal-remote:latest
 ```
 
-更可重复的部署应固定同一个已验证remote根digest：
+更可重复的部署应把两处同时固定为同一个已验证remote根digest：
 
 ```yaml
 image: ghcr.io/wekingchen/codex-dev-personal-remote@sha256:<remote-root-digest>
 ```
 
-必须同时修改：
+### Xray宿主配置
 
-- `codex-ssh-hostkey-init`
-- `codex-ssh`
+先在Docker宿主机准备root-only目录：
 
-其他端口、volume、authorized keys、host keys、tmpfs、capabilities和healthcheck全部保持公开模板原样。
+```bash
+mkdir -p /root/codex/xray
+chown root:root /root/codex/xray
+chmod 0700 /root/codex/xray
+```
+
+将真实Xray JSON配置保存为：
+
+```text
+/root/codex/xray/config.json
+```
+
+并设置：
+
+```bash
+chown root:root /root/codex/xray/config.json
+chmod 0600 /root/codex/xray/config.json
+```
+
+配置必须满足容器启动契约：
+
+- 严格JSON，不使用JSONC/YAML或相对文件路径。
+- 至少一个HTTP inbound精确监听 `127.0.0.1:10809`。
+- 所有inbound只能监听 `127.0.0.1` 或 `::1`。
+- `log.access` 必须为 `none`，`loglevel`只能为 `warning`、`error` 或 `none`，`dnsLog`不能为true。
+- 第一个/default outbound必须是实际远端代理，不能是 `freedom` 或 `blackhole`。
+- 不允许任何 `freedom` outbound，避免启用代理后静默直连。
+
+结构示例仅展示安全外壳；不要把真实节点值写入仓库或Stack：
+
+```json
+{
+  "log": {
+    "access": "none",
+    "loglevel": "warning",
+    "dnsLog": false
+  },
+  "inbounds": [
+    {
+      "tag": "local-http",
+      "listen": "127.0.0.1",
+      "port": 10809,
+      "protocol": "http",
+      "settings": {}
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "proxy",
+      "protocol": "<vless|vmess|trojan|shadowsocks|socks>",
+      "settings": {
+        "servers": [
+          {
+            "address": "<SERVER>",
+            "port": 443,
+            "users": [
+              {"id": "<UUID>"}
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": []
+  }
+}
+```
+
+不同outbound协议的schema不同，上述 `settings` 只是占位结构，必须按你的节点协议改写。真实节点地址、UUID、密码、私钥和订阅URL只应存在于宿主机root-only配置。若配置引用额外CA、证书或密钥文件，使用容器内绝对路径单独只读挂载，并确保UID/GID 65532的Xray进程具有所需读取权限。
+
+容器内的 `dev` 用户保留 `NOPASSWD sudo`，因此本来就等价于该容器root；Xray以UID/GID 65532运行是进程最小权限，不是对 `dev` 隐藏节点配置的边界。不要把容器SSH公钥授权给不可信用户。
+
+### 代理开关
+
+Stack中只有一个开关：
+
+```yaml
+XRAY_PROXY_ENABLED: "true"
+```
+
+- `"true"`：验证并启动Xray，等待10809就绪后再启动sshd；SSH中的Codex和Claude Code获得大小写 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`。
+- `"false"`：不要求有效Xray配置、不启动Xray、不监听10809，也不向SSH/login shell注入代理变量，两个CLI直接联网。
+- 其他值：容器拒绝启动。
+- 不要在Stack中另外设置 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 或 `NO_PROXY`（包括小写形式）；personal entrypoint会拒绝这些旁路配置，代理只由单一开关管理。
+
+切换后必须在Portainer中Recreate/Update Stack，不能只修改运行中进程。配置挂载可在关闭模式下保留。旧Stack没有设置该变量时默认按 `false` 启动。容器开关只管理本方案生成的代理环境；如果你曾在持久化home的 `.bashrc`、`.profile` 或Claude settings中手工写过代理变量，应先删除这些自定义设置，否则它们仍可覆盖关闭模式。
+
+Xray端口绝不能加入 `ports` 或 `expose`。宿主机仍只能看到：
+
+```yaml
+ports:
+  - "127.0.0.1:2222:2222"
+```
+
+直接执行 `docker exec --user dev codex ...` 不经过login profile，不能依赖动态代理开关；请使用SSH，或：
+
+```bash
+docker exec --user dev codex-ssh bash -lc 'codex --version'
+docker exec --user dev codex-ssh bash -lc 'claude --version'
+```
+
+### 真实代理E2E
+
+开启代理后在容器SSH会话中执行：
+
+```bash
+echo "$HTTPS_PROXY"
+curl --fail --show-error --proxy http://127.0.0.1:10809 https://api.ipify.org
+codex
+claude
+```
+
+需要同时确认：
+
+- `HTTPS_PROXY` 为 `http://127.0.0.1:10809`。
+- 出口IP与关闭代理后的直接出口不同。
+- Codex真实Responses请求成功，包括WebSocket路径及必要时的HTTPS fallback。
+- Claude Code真实请求成功。
+- `docker inspect codex-ssh --format '{{json .NetworkSettings.Ports}}'` 只显示2222映射，没有10809。
+- `docker logs codex-ssh` 不出现UUID、密码、订阅URL或长期access log。
+
+关闭开关并Recreate后，再确认 `env | grep -i proxy` 不包含HTTP/HTTPS代理变量，`pgrep -x xray`无结果，两个CLI仍能直接联网。
 
 ## 10. 更新与回滚
 
@@ -341,8 +483,10 @@ docker image inspect "$running_image_id" --format '{{json .RepoDigests}}'
 4. 验证：
 
    ```bash
-   docker exec --user dev codex-ssh codex --version
-   docker exec --user dev codex-ssh claude --version
+   docker exec --user dev codex-ssh bash -lc 'codex --version'
+   docker exec --user dev codex-ssh bash -lc 'claude --version'
+   docker exec codex-ssh xray version
+   docker exec codex-ssh /usr/local/bin/personal-remote-healthcheck.sh
    ```
 
 回滚时把host-key-init和codex-ssh同时改回同一个历史remote根digest，再重新部署。

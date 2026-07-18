@@ -1,5 +1,8 @@
 workspace/
 .codex-ssh/
+.xray/
+xray/config.json
+xray-config.json
 **/.claude/.credentials.json
 **/.claude/settings.local.json
 **/.claude.json
