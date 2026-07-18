@@ -1,4 +1,4 @@
-name: 构建私有 Codex + Claude personal 镜像
+name: 构建私有 Codex + Claude + Xray personal 镜像
 
 on:
   pull_request:
@@ -18,7 +18,7 @@ on:
         default: false
         type: boolean
   schedule:
-    # 公开镜像03:07构建后，于UTC 06:17解析父镜像和Claude latest并自动提升。
+    # 公开镜像03:07构建后，于UTC 06:17解析父镜像、Claude latest与Xray最新发布并自动提升。
     - cron: "17 6 * * *"
 
 permissions:
@@ -85,6 +85,9 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/audit-claude-private-supply-chain.sh" \
             --static-only \
             --evidence-dir "$RUNNER_TEMP/claude-private-static-evidence"
+          "$GITHUB_WORKSPACE/scripts/audit-xray-private-supply-chain.sh" \
+            --static-only \
+            --evidence-dir "$RUNNER_TEMP/xray-private-static-evidence"
 
       - name: 检查空白错误
         run: git diff --check
@@ -308,6 +311,43 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  resolve-xray:
+    name: 解析并验证Xray官方最新发布
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'bootstrap'
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.xray.outputs.tag }}
+      version: ${{ steps.xray.outputs.version }}
+      published_at: ${{ steps.xray.outputs.published_at }}
+      prerelease: ${{ steps.xray.outputs.prerelease }}
+      sha256_amd64: ${{ steps.xray.outputs.sha256_amd64 }}
+      sha256_arm64: ${{ steps.xray.outputs.sha256_arm64 }}
+      size_amd64: ${{ steps.xray.outputs.size_amd64 }}
+      size_arm64: ${{ steps.xray.outputs.size_arm64 }}
+      url_amd64: ${{ steps.xray.outputs.url_amd64 }}
+      url_arm64: ${{ steps.xray.outputs.url_arm64 }}
+
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: 解析最新非draft Xray release并验证asset元数据
+        id: xray
+        env:
+          AUDIT_EVIDENCE_DIR: ${{ runner.temp }}/xray-release-evidence
+        run: ./scripts/audit-xray-private-supply-chain.sh --resolve-only
+
+      - name: 上传Xray release证据
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xray-release-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/xray-release-evidence
+          if-no-files-found: error
+          retention-days: 30
+
   platform-smoke:
     name: 本地构建并验证personal双镜像 ${{ matrix.platform }}
     if: github.event_name != 'workflow_dispatch' || inputs.mode != 'bootstrap'
@@ -316,6 +356,7 @@ jobs:
       - static
       - resolve-public
       - resolve-claude
+      - resolve-xray
     strategy:
       fail-fast: false
       matrix:
@@ -405,11 +446,19 @@ jobs:
             CLAUDE_SHA256_ARM64=${{ needs.resolve-claude.outputs.sha256_arm64 }}
             CLAUDE_SIZE_AMD64=${{ needs.resolve-claude.outputs.size_amd64 }}
             CLAUDE_SIZE_ARM64=${{ needs.resolve-claude.outputs.size_arm64 }}
+            XRAY_TAG=${{ needs.resolve-xray.outputs.tag }}
+            XRAY_VERSION=${{ needs.resolve-xray.outputs.version }}
+            XRAY_PUBLISHED_AT=${{ needs.resolve-xray.outputs.published_at }}
+            XRAY_PRERELEASE=${{ needs.resolve-xray.outputs.prerelease }}
+            XRAY_SHA256_AMD64=${{ needs.resolve-xray.outputs.sha256_amd64 }}
+            XRAY_SHA256_ARM64=${{ needs.resolve-xray.outputs.sha256_arm64 }}
+            XRAY_SIZE_AMD64=${{ needs.resolve-xray.outputs.size_amd64 }}
+            XRAY_SIZE_ARM64=${{ needs.resolve-xray.outputs.size_arm64 }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             io.codex-dev.build.repository=https://github.com/${{ github.repository }}
             org.opencontainers.image.title=codex-dev-personal-remote
-            org.opencontainers.image.description=基于公开Codex remote并固定安装已验签Claude Code的个人私有SSH镜像。
+            org.opencontainers.image.description=基于公开Codex remote并安装已验签Claude Code与本次exact Xray latest的个人私有SSH镜像。
             io.codex-dev.release-set=personal-${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: |
             type=gha,scope=personal-base-${{ matrix.name }}
@@ -420,6 +469,8 @@ jobs:
         env:
           EXPECTED_CLAUDE_VERSION: ${{ needs.resolve-claude.outputs.version }}
           EXPECTED_CLAUDE_SHA256: ${{ matrix.name == 'amd64' && needs.resolve-claude.outputs.sha256_amd64 || needs.resolve-claude.outputs.sha256_arm64 }}
+          EXPECTED_XRAY_VERSION: ${{ needs.resolve-xray.outputs.version }}
+          EXPECTED_XRAY_SHA256: ${{ matrix.name == 'amd64' && needs.resolve-xray.outputs.sha256_amd64 || needs.resolve-xray.outputs.sha256_arm64 }}
         run: |
           ./scripts/smoke-remote-ssh.sh \
             codex-dev-personal-smoke-remote:${{ matrix.name }} \
@@ -577,6 +628,7 @@ jobs:
     needs:
       - resolve-public
       - resolve-claude
+      - resolve-xray
       - registry-preflight
     permissions:
       contents: read
@@ -638,11 +690,19 @@ jobs:
             CLAUDE_SHA256_ARM64=${{ needs.resolve-claude.outputs.sha256_arm64 }}
             CLAUDE_SIZE_AMD64=${{ needs.resolve-claude.outputs.size_amd64 }}
             CLAUDE_SIZE_ARM64=${{ needs.resolve-claude.outputs.size_arm64 }}
+            XRAY_TAG=${{ needs.resolve-xray.outputs.tag }}
+            XRAY_VERSION=${{ needs.resolve-xray.outputs.version }}
+            XRAY_PUBLISHED_AT=${{ needs.resolve-xray.outputs.published_at }}
+            XRAY_PRERELEASE=${{ needs.resolve-xray.outputs.prerelease }}
+            XRAY_SHA256_AMD64=${{ needs.resolve-xray.outputs.sha256_amd64 }}
+            XRAY_SHA256_ARM64=${{ needs.resolve-xray.outputs.sha256_arm64 }}
+            XRAY_SIZE_AMD64=${{ needs.resolve-xray.outputs.size_amd64 }}
+            XRAY_SIZE_ARM64=${{ needs.resolve-xray.outputs.size_arm64 }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             io.codex-dev.build.repository=https://github.com/${{ github.repository }}
             org.opencontainers.image.title=codex-dev-personal-remote
-            org.opencontainers.image.description=基于公开Codex remote并固定安装已验签Claude Code的个人私有SSH镜像。
+            org.opencontainers.image.description=基于公开Codex remote并安装已验签Claude Code与本次exact Xray latest的个人私有SSH镜像。
             io.codex-dev.release-set=personal-${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: |
             type=gha,scope=personal-remote-amd64
@@ -702,6 +762,7 @@ jobs:
     needs:
       - resolve-public
       - resolve-claude
+      - resolve-xray
       - publish-base
       - publish-remote
       - post-push-visibility
@@ -736,6 +797,8 @@ jobs:
         env:
           EXPECTED_CLAUDE_VERSION: ${{ needs.resolve-claude.outputs.version }}
           EXPECTED_CLAUDE_SHA256: ${{ matrix.name == 'amd64' && needs.resolve-claude.outputs.sha256_amd64 || needs.resolve-claude.outputs.sha256_arm64 }}
+          EXPECTED_XRAY_VERSION: ${{ needs.resolve-xray.outputs.version }}
+          EXPECTED_XRAY_SHA256: ${{ matrix.name == 'amd64' && needs.resolve-xray.outputs.sha256_amd64 || needs.resolve-xray.outputs.sha256_arm64 }}
           BASE_REF: ${{ needs.publish-base.outputs.image_name }}@${{ needs.publish-base.outputs.digest }}
           REMOTE_REF: ${{ needs.publish-remote.outputs.image_name }}@${{ needs.publish-remote.outputs.digest }}
           CODEX_VERSION: ${{ needs.resolve-public.outputs.codex_version }}
@@ -754,6 +817,7 @@ jobs:
     needs:
       - resolve-public
       - resolve-claude
+      - resolve-xray
       - publish-base
       - publish-remote
       - post-push-visibility
@@ -786,6 +850,12 @@ jobs:
           CLAUDE_VERSION: ${{ needs.resolve-claude.outputs.version }}
           CLAUDE_COMMIT: ${{ needs.resolve-claude.outputs.commit }}
           CLAUDE_MANIFEST_SHA256: ${{ needs.resolve-claude.outputs.manifest_sha256 }}
+          XRAY_TAG: ${{ needs.resolve-xray.outputs.tag }}
+          XRAY_VERSION: ${{ needs.resolve-xray.outputs.version }}
+          XRAY_PUBLISHED_AT: ${{ needs.resolve-xray.outputs.published_at }}
+          XRAY_PRERELEASE: ${{ needs.resolve-xray.outputs.prerelease }}
+          XRAY_SHA256_AMD64: ${{ needs.resolve-xray.outputs.sha256_amd64 }}
+          XRAY_SHA256_ARM64: ${{ needs.resolve-xray.outputs.sha256_arm64 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -836,7 +906,13 @@ jobs:
                 --arg mise_version "v${MISE_VERSION}" \
                 --arg claude_version "$CLAUDE_VERSION" \
                 --arg claude_commit "$CLAUDE_COMMIT" \
-                --arg claude_manifest "$CLAUDE_MANIFEST_SHA256" '
+                --arg claude_manifest "$CLAUDE_MANIFEST_SHA256" \
+                --arg xray_tag "$XRAY_TAG" \
+                --arg xray_version "$XRAY_VERSION" \
+                --arg xray_published_at "$XRAY_PUBLISHED_AT" \
+                --arg xray_prerelease "$XRAY_PRERELEASE" \
+                --arg xray_sha256_amd64 "$XRAY_SHA256_AMD64" \
+                --arg xray_sha256_arm64 "$XRAY_SHA256_ARM64" '
                   (.["org.opencontainers.image.source"] // "") == "" and
                   .["org.opencontainers.image.revision"] == $revision and
                   .["io.codex-dev.build.repository"] == $repository and
@@ -849,7 +925,21 @@ jobs:
                   .["io.codex-dev.mise.version"] == $mise_version and
                   .["io.codex-dev.claude.version"] == $claude_version and
                   .["io.codex-dev.claude.commit"] == $claude_commit and
-                  .["io.codex-dev.claude.manifest-sha256"] == $claude_manifest
+                  .["io.codex-dev.claude.manifest-sha256"] == $claude_manifest and
+                  (
+                    if $role == "remote" then
+                      .["io.codex-dev.xray.source"] == "https://github.com/XTLS/Xray-core" and
+                      .["io.codex-dev.xray.tag"] == $xray_tag and
+                      .["io.codex-dev.xray.version"] == $xray_version and
+                      .["io.codex-dev.xray.published-at"] == $xray_published_at and
+                      .["io.codex-dev.xray.prerelease"] == $xray_prerelease and
+                      .["io.codex-dev.xray.signed"] == "false" and
+                      .["io.codex-dev.xray.sha256-amd64"] == $xray_sha256_amd64 and
+                      .["io.codex-dev.xray.sha256-arm64"] == $xray_sha256_arm64
+                    else
+                      (.["io.codex-dev.xray.version"] // "") == ""
+                    end
+                  )
                 ' "$labels" >/dev/null
             done
           }
@@ -861,6 +951,7 @@ jobs:
             echo "### Personal candidate supply-chain"
             echo "- base: \`${BASE_IMAGE}@${BASE_DIGEST}\`"
             echo "- remote: \`${REMOTE_IMAGE}@${REMOTE_DIGEST}\`"
+            echo "- Xray: \`${XRAY_TAG}\` (prerelease=\`${XRAY_PRERELEASE}\`)"
             echo "- 双平台root、provenance、SBOM和关键labels均已验证"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -1003,6 +1094,7 @@ jobs:
       - static
       - resolve-public
       - resolve-claude
+      - resolve-xray
       - publish-base
       - publish-remote
       - post-push-visibility
@@ -1079,6 +1171,41 @@ jobs:
             echo "Claude latest或exact manifest在构建期间发生变化，停止promotion。" >&2
             exit 1
           fi
+
+      - name: 重新解析Xray最新发布并比较
+        env:
+          EXPECTED_TAG: ${{ needs.resolve-xray.outputs.tag }}
+          EXPECTED_VERSION: ${{ needs.resolve-xray.outputs.version }}
+          EXPECTED_PUBLISHED_AT: ${{ needs.resolve-xray.outputs.published_at }}
+          EXPECTED_PRERELEASE: ${{ needs.resolve-xray.outputs.prerelease }}
+          EXPECTED_AMD64: ${{ needs.resolve-xray.outputs.sha256_amd64 }}
+          EXPECTED_ARM64: ${{ needs.resolve-xray.outputs.sha256_arm64 }}
+          EXPECTED_SIZE_AMD64: ${{ needs.resolve-xray.outputs.size_amd64 }}
+          EXPECTED_SIZE_ARM64: ${{ needs.resolve-xray.outputs.size_arm64 }}
+          AUDIT_EVIDENCE_DIR: ${{ runner.temp }}/xray-promotion-recheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_outputs="$RUNNER_TEMP/current-xray.outputs"
+          : > "$current_outputs"
+          GITHUB_OUTPUT="$current_outputs" ./scripts/audit-xray-private-supply-chain.sh --resolve-only >/dev/null
+          for key in tag version published_at prerelease sha256_amd64 sha256_arm64 size_amd64 size_arm64; do
+            current="$(awk -F= -v key="$key" '$1 == key {print $2; exit}' "$current_outputs")"
+            case "$key" in
+              tag) expected="$EXPECTED_TAG" ;;
+              version) expected="$EXPECTED_VERSION" ;;
+              published_at) expected="$EXPECTED_PUBLISHED_AT" ;;
+              prerelease) expected="$EXPECTED_PRERELEASE" ;;
+              sha256_amd64) expected="$EXPECTED_AMD64" ;;
+              sha256_arm64) expected="$EXPECTED_ARM64" ;;
+              size_amd64) expected="$EXPECTED_SIZE_AMD64" ;;
+              size_arm64) expected="$EXPECTED_SIZE_ARM64" ;;
+            esac
+            if [ "$current" != "$expected" ]; then
+              echo "Xray最新发布在构建期间发生变化：$key 期望$expected，实际${current:-<空>}" >&2
+              exit 1
+            fi
+          done
 
       - name: promotion前再次确认private
         env:
@@ -1197,6 +1324,7 @@ jobs:
       - static
       - resolve-public
       - resolve-claude
+      - resolve-xray
       - publish-base
       - publish-remote
       - post-push-visibility
@@ -1346,6 +1474,14 @@ jobs:
           CLAUDE_MANIFEST_SHA256: ${{ needs.resolve-claude.outputs.manifest_sha256 }}
           CLAUDE_SHA256_AMD64: ${{ needs.resolve-claude.outputs.sha256_amd64 }}
           CLAUDE_SHA256_ARM64: ${{ needs.resolve-claude.outputs.sha256_arm64 }}
+          XRAY_TAG: ${{ needs.resolve-xray.outputs.tag }}
+          XRAY_VERSION: ${{ needs.resolve-xray.outputs.version }}
+          XRAY_PUBLISHED_AT: ${{ needs.resolve-xray.outputs.published_at }}
+          XRAY_PRERELEASE: ${{ needs.resolve-xray.outputs.prerelease }}
+          XRAY_SHA256_AMD64: ${{ needs.resolve-xray.outputs.sha256_amd64 }}
+          XRAY_SHA256_ARM64: ${{ needs.resolve-xray.outputs.sha256_arm64 }}
+          XRAY_SIZE_AMD64: ${{ needs.resolve-xray.outputs.size_amd64 }}
+          XRAY_SIZE_ARM64: ${{ needs.resolve-xray.outputs.size_arm64 }}
           RELEASE_DATE: ${{ needs.static.outputs.release_date }}
           BASE_PROMOTION_STATE: ${{ steps.promotion-state.outputs.base_state }}
           REMOTE_PROMOTION_STATE: ${{ steps.promotion-state.outputs.remote_state }}
@@ -1386,6 +1522,14 @@ jobs:
             --arg claude_manifest_sha256 "$CLAUDE_MANIFEST_SHA256" \
             --arg claude_sha256_amd64 "$CLAUDE_SHA256_AMD64" \
             --arg claude_sha256_arm64 "$CLAUDE_SHA256_ARM64" \
+            --arg xray_tag "$XRAY_TAG" \
+            --arg xray_version "$XRAY_VERSION" \
+            --arg xray_published_at "$XRAY_PUBLISHED_AT" \
+            --arg xray_prerelease "$XRAY_PRERELEASE" \
+            --arg xray_sha256_amd64 "$XRAY_SHA256_AMD64" \
+            --arg xray_sha256_arm64 "$XRAY_SHA256_ARM64" \
+            --arg xray_size_amd64 "$XRAY_SIZE_AMD64" \
+            --arg xray_size_arm64 "$XRAY_SIZE_ARM64" \
             --arg base_promotion_state "$BASE_PROMOTION_STATE" \
             --arg remote_promotion_state "$REMOTE_PROMOTION_STATE" \
             --arg overall_promotion_state "$OVERALL_PROMOTION_STATE" \
@@ -1429,6 +1573,18 @@ jobs:
                   sha256_amd64: $claude_sha256_amd64,
                   sha256_arm64: $claude_sha256_arm64,
                   signing_fingerprint: "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
+                },
+                xray: {
+                  tag: $xray_tag,
+                  version: $xray_version,
+                  published_at: $xray_published_at,
+                  prerelease: ($xray_prerelease == "true"),
+                  sha256_amd64: $xray_sha256_amd64,
+                  sha256_arm64: $xray_sha256_arm64,
+                  size_amd64: ($xray_size_amd64 | tonumber),
+                  size_arm64: ($xray_size_arm64 | tonumber),
+                  signed: false,
+                  trust: "GitHub release asset digest/size and exact asset SHA-256"
                 }
               }
             ' > release-evidence/release.json
@@ -1453,6 +1609,9 @@ jobs:
             echo "- mise: \`$MISE_VERSION\`"
             echo "- Claude Code: \`$CLAUDE_VERSION\` (commit \`$CLAUDE_COMMIT\`)"
             echo "- Claude manifest SHA-256: \`$CLAUDE_MANIFEST_SHA256\`"
+            echo "- Xray: \`$XRAY_TAG\` (prerelease=\`$XRAY_PRERELEASE\`, published \`$XRAY_PUBLISHED_AT\`)"
+            echo "- Xray amd64 SHA-256: \`$XRAY_SHA256_AMD64\`"
+            echo "- Xray arm64 SHA-256: \`$XRAY_SHA256_ARM64\`"
           } | tee release-evidence/summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: 上传私有发布证据

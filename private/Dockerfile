@@ -69,6 +69,46 @@ RUN set -eux; \
     test "${ACTUAL_VERSION}" = "${CLAUDE_VERSION}"; \
     rm -rf "${GNUPGHOME}" /tmp/claude /tmp/claude-code.asc /tmp/claude-manifest.json /tmp/claude-manifest.json.sig
 
+FROM ${PUBLIC_BASE_REF} AS xray-fetch
+
+ARG TARGETARCH
+ARG XRAY_TAG
+ARG XRAY_VERSION
+ARG XRAY_SHA256_AMD64
+ARG XRAY_SHA256_ARM64
+ARG XRAY_SIZE_AMD64
+ARG XRAY_SIZE_ARM64
+
+USER root
+
+# Xray latest先由workflow解析为exact tag、双架构GitHub asset digest和size；
+# 本层只下载该不可变release资产，不使用浮动latest或远程安装脚本。
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) XRAY_ASSET='Xray-linux-64.zip'; EXPECTED_SHA256="${XRAY_SHA256_AMD64}"; EXPECTED_SIZE="${XRAY_SIZE_AMD64}" ;; \
+        arm64) XRAY_ASSET='Xray-linux-arm64-v8a.zip'; EXPECTED_SHA256="${XRAY_SHA256_ARM64}"; EXPECTED_SIZE="${XRAY_SIZE_ARM64}" ;; \
+        *) echo "Unsupported TARGETARCH for Xray: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    test "${XRAY_TAG}" = "v${XRAY_VERSION}"; \
+    test -n "${EXPECTED_SHA256}"; \
+    test -n "${EXPECTED_SIZE}"; \
+    XRAY_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_TAG}/${XRAY_ASSET}"; \
+    curl --fail --location --silent --show-error --retry 3 \
+        --proto '=https' --tlsv1.2 \
+        "${XRAY_URL}" --output /tmp/xray.zip; \
+    printf '%s  %s\n' "${EXPECTED_SHA256}" /tmp/xray.zip | sha256sum --check --strict; \
+    test "$(stat -c %s /tmp/xray.zip)" = "${EXPECTED_SIZE}"; \
+    install -d -m 0755 /opt/xray/bin /opt/xray/share; \
+    unzip -p /tmp/xray.zip xray > /tmp/xray; \
+    unzip -p /tmp/xray.zip geoip.dat > /tmp/geoip.dat; \
+    unzip -p /tmp/xray.zip geosite.dat > /tmp/geosite.dat; \
+    unzip -p /tmp/xray.zip LICENSE > /tmp/LICENSE; \
+    install -o root -g root -m 0755 /tmp/xray /opt/xray/bin/xray; \
+    install -o root -g root -m 0644 /tmp/geoip.dat /tmp/geosite.dat /tmp/LICENSE /opt/xray/share/; \
+    ACTUAL_XRAY_VERSION="$(/opt/xray/bin/xray version | awk 'NR == 1 {print $2}')"; \
+    test "${ACTUAL_XRAY_VERSION}" = "${XRAY_VERSION}"; \
+    rm -f /tmp/xray.zip /tmp/xray /tmp/geoip.dat /tmp/geosite.dat /tmp/LICENSE
+
 FROM ${PUBLIC_BASE_REF} AS personal-base
 
 ARG PUBLIC_BASE_REF
@@ -103,9 +143,33 @@ ARG PERSONAL_RELEASE_SET
 ARG CLAUDE_VERSION
 ARG CLAUDE_COMMIT
 ARG CLAUDE_MANIFEST_SHA256
+ARG XRAY_TAG
+ARG XRAY_VERSION
+ARG XRAY_PUBLISHED_AT
+ARG XRAY_PRERELEASE
+ARG XRAY_SHA256_AMD64
+ARG XRAY_SHA256_ARM64
 
 USER root
 COPY --from=claude-fetch --chown=0:0 --chmod=0755 /opt/claude/claude /usr/local/bin/claude
+COPY --from=xray-fetch --chown=0:0 --chmod=0755 /opt/xray/bin/xray /usr/local/bin/xray
+COPY --from=xray-fetch --chown=0:0 --chmod=0644 /opt/xray/share/geoip.dat /opt/xray/share/geosite.dat /usr/local/share/xray/
+COPY --from=xray-fetch --chown=0:0 --chmod=0644 /opt/xray/share/LICENSE /usr/local/share/licenses/xray-core/LICENSE
+COPY --chmod=0755 scripts/remote-entrypoint.sh /usr/local/bin/remote-entrypoint.sh
+COPY --chmod=0755 scripts/personal-remote-entrypoint.sh /usr/local/bin/personal-remote-entrypoint.sh
+COPY --chmod=0755 scripts/personal-remote-healthcheck.sh /usr/local/bin/personal-remote-healthcheck.sh
+COPY --chmod=0644 private/codex-xray-proxy.sh /etc/profile.d/codex-xray-proxy.sh
+
+RUN set -eux; \
+    if getent passwd 65532 >/dev/null || getent group 65532 >/dev/null; then \
+        echo 'UID或GID 65532已被占用，无法创建固定xray用户。' >&2; \
+        exit 1; \
+    fi; \
+    groupadd --system --gid 65532 xray; \
+    useradd --system --uid 65532 --gid xray --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin xray; \
+    test "$(/usr/local/bin/xray version | awk 'NR == 1 {print $2}')" = "${XRAY_VERSION}"; \
+    test "$(stat -c %U:%G /usr/local/bin/xray)" = root:root; \
+    test "$(stat -c %a /usr/local/bin/xray)" = 755
 
 # OpenSSH只采用第一条SetEnv；规范化已发布的旧父模板后，在唯一指令中扩展私有更新禁用变量。
 RUN set -eux; \
@@ -136,7 +200,9 @@ RUN set -eux; \
     grep -Fqx "${final_setenv}" "${config}"
 
 ENV DISABLE_AUTOUPDATER=1 \
-    DISABLE_UPDATES=1
+    DISABLE_UPDATES=1 \
+    XRAY_LOCATION_ASSET=/usr/local/share/xray \
+    XRAY_PROXY_ENABLED=false
 
 LABEL org.opencontainers.image.source="" \
       io.codex-dev.build.repository="https://github.com/wekingchen/codex-dev-docker" \
@@ -147,4 +213,17 @@ LABEL org.opencontainers.image.source="" \
       io.codex-dev.claude.source="https://downloads.claude.ai/claude-code-releases" \
       io.codex-dev.claude.version="${CLAUDE_VERSION}" \
       io.codex-dev.claude.commit="${CLAUDE_COMMIT}" \
-      io.codex-dev.claude.manifest-sha256="${CLAUDE_MANIFEST_SHA256}"
+      io.codex-dev.claude.manifest-sha256="${CLAUDE_MANIFEST_SHA256}" \
+      io.codex-dev.xray.source="https://github.com/XTLS/Xray-core" \
+      io.codex-dev.xray.tag="${XRAY_TAG}" \
+      io.codex-dev.xray.version="${XRAY_VERSION}" \
+      io.codex-dev.xray.published-at="${XRAY_PUBLISHED_AT}" \
+      io.codex-dev.xray.prerelease="${XRAY_PRERELEASE}" \
+      io.codex-dev.xray.signed="false" \
+      io.codex-dev.xray.sha256-amd64="${XRAY_SHA256_AMD64}" \
+      io.codex-dev.xray.sha256-arm64="${XRAY_SHA256_ARM64}"
+
+HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=12 \
+    CMD ["/usr/local/bin/personal-remote-healthcheck.sh"]
+
+ENTRYPOINT ["/usr/local/bin/personal-remote-entrypoint.sh"]

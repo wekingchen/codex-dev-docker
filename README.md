@@ -69,7 +69,7 @@ ghcr.io/wekingchen/codex-dev-personal-base
 ghcr.io/wekingchen/codex-dev-personal-remote
 ```
 
-私有镜像从配对的公开不可变digest派生，并通过固定Anthropic release key指纹、detached manifest signature、双架构checksum和size验证Claude Code native binary。private package使用owner PAT而不是公开仓库`GITHUB_TOKEN`发布，并在candidate push前后和promotion前fail closed确认visibility为private且未关联repository。
+私有镜像从配对的公开不可变digest派生，并通过固定Anthropic release key指纹、detached manifest signature、双架构checksum和size验证Claude Code native binary。`personal-remote`还会在每次workflow解析XTLS/Xray-core发布时间最新的非draft release（包含prerelease），将其固定为本次exact tag与双架构asset digest后安装；运行时由 `XRAY_PROXY_ENABLED=true|false` 选择代理或直接联网，节点配置只从宿主机root-only文件挂载。private package使用owner PAT而不是公开仓库`GITHUB_TOKEN`发布，并在candidate push前后和promotion前fail closed确认visibility为private且未关联repository。
 
 本地覆盖私有镜像后，可以使用：
 
@@ -78,7 +78,7 @@ ghcr.io/wekingchen/codex-dev-personal-remote
 ./scripts/run.sh claude
 ```
 
-同一个 `/home/dev` 会分别持久化 `.codex`、`.claude` 和 `.claude.json`。完整的一次性GHCR bootstrap、GitHub Secrets、Portainer认证、升级与回滚说明见：[`docs/PERSONAL-DUAL-CLI.md`](docs/PERSONAL-DUAL-CLI.md)。
+同一个 `/home/dev` 会分别持久化 `.codex`、`.claude` 和 `.claude.json`。可手动运行 `./scripts/audit-xray-private-supply-chain.sh --resolve-only` 查看当前将被构建的Xray最新exact release。完整的一次性GHCR bootstrap、GitHub Secrets、Portainer认证、代理开关、升级与回滚说明见：[`docs/PERSONAL-DUAL-CLI.md`](docs/PERSONAL-DUAL-CLI.md)。
 
 > Claude Code是专有软件。该流程限定private、仅本人自用；自动门禁能验证private且未关联repository，但显式用户/Actions ACL仍需owner人工保持为空。不要向第三方分发镜像或共享Claude认证。
 
@@ -154,7 +154,8 @@ docker compose run --rm codex
 
 - 仓库 Compose/ProxyJump 通用说明：[`docs/USAGE.md`](docs/USAGE.md)
 - Portainer + PuTTYgen + WinSCP 最终教程：[`docs/PORTAINER.md`](docs/PORTAINER.md)
-- 可直接粘贴到 Portainer 的 Stack 模板：[`templates/portainer-stack.yaml`](templates/portainer-stack.yaml)
+- 公开Codex-only Stack模板：[`templates/portainer-stack.yaml`](templates/portainer-stack.yaml)
+- 私有Codex + Claude + 可选Xray Stack模板：[`templates/portainer-personal-stack.yaml`](templates/portainer-personal-stack.yaml)
 
 生成专用客户端密钥并启动：
 

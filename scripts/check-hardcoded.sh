@@ -28,6 +28,9 @@ FILES_TO_CHECK=(
   "scripts/dev-init.sh"
   "scripts/dev-entrypoint.sh"
   "scripts/remote-entrypoint.sh"
+  "scripts/personal-remote-entrypoint.sh"
+  "scripts/personal-remote-healthcheck.sh"
+  "scripts/audit-xray-private-supply-chain.sh"
   "scripts/remote-hostkey-init.sh"
   "scripts/remote.sh"
   "scripts/smoke-image.sh"
@@ -35,8 +38,10 @@ FILES_TO_CHECK=(
   "scripts/validate-authorized-keys.sh"
   "remote/sshd_config"
   "templates/portainer-stack.yaml"
+  "templates/portainer-personal-stack.yaml"
   "base/Dockerfile"
   "private/Dockerfile"
+  "private/codex-xray-proxy.sh"
   "private/visibility-probe.Dockerfile"
 )
 

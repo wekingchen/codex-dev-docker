@@ -53,19 +53,19 @@ ghcr.io/wekingchen/codex-dev-remote:latest
 
 ### 个人私有 dual-CLI 镜像
 
-如果本人需要在同一远程容器中任选 `codex` 或 `claude`，不要修改仓库公开模板。先在Portainer Registries中添加带 `read:packages` 权限的GHCR凭据，然后复制Stack并把两个服务的image同时替换为：
+如果本人需要在同一远程容器中任选 `codex` 或 `claude`，并可选择使用内置Xray代理，请使用私有专用模板：[`templates/portainer-personal-stack.yaml`](../templates/portainer-personal-stack.yaml)。先在Portainer Registries中添加带 `read:packages` 权限的GHCR凭据；模板中的host-key-init与主服务都使用：
 
 ```text
 ghcr.io/wekingchen/codex-dev-personal-remote:latest
 ```
 
-或更稳妥的已验证根digest：
+或同时固定为更稳妥的已验证根digest：
 
 ```text
 ghcr.io/wekingchen/codex-dev-personal-remote@sha256:<remote-root-digest>
 ```
 
-host-key-init与主服务必须使用同一个引用。其他端口、bind mounts、authorized keys、host keys和安全配置保持本文原样。PAT只保存在Portainer registry credential中，不写入Stack YAML；Claude登录在容器内完成并保存在 `/root/codex/dev-home`。
+personal-remote把Xray和sshd运行在同一容器中，Xray只监听容器 `127.0.0.1:10809`，宿主机仍只发布 `127.0.0.1:2222`。`XRAY_PROXY_ENABLED="true"` 启用代理，`"false"` 停用；真实节点配置从宿主机 `/root/codex/xray/config.json` 只读挂载，不能写入Stack environment。完整配置契约、目录权限和E2E见 [`PERSONAL-DUAL-CLI.md`](PERSONAL-DUAL-CLI.md)。PAT只保存在Portainer registry credential中；Claude登录保存在 `/root/codex/dev-home`。
 
 ### `codex-ssh-hostkey-init`
 
@@ -133,6 +133,17 @@ chown -R root:root \
 chmod 0700 \
   /root/codex/ssh \
   /root/codex/ssh-hostkeys
+```
+
+personal Xray模板还需要：
+
+```bash
+mkdir -p /root/codex/xray
+chown root:root /root/codex/xray
+chmod 0700 /root/codex/xray
+# 写入真实配置后：
+chown root:root /root/codex/xray/config.json
+chmod 0600 /root/codex/xray/config.json
 ```
 
 如果宿主机实际使用其他非零 UID/GID，应同时修改目录所有权和 Stack 中的：
@@ -614,7 +625,9 @@ docker inspect codex-ssh \
 docker exec --user dev codex-ssh codex --version
 docker exec --user dev codex-ssh mise --version
 # personal双CLI Stack另外执行：
-docker exec --user dev codex-ssh claude --version
+docker exec --user dev codex-ssh bash -lc 'claude --version'
+docker exec codex-ssh xray version
+docker exec codex-ssh /usr/local/bin/personal-remote-healthcheck.sh
 ```
 
 更新不会删除：
@@ -746,5 +759,7 @@ docker pull ghcr.io/wekingchen/codex-dev-remote:latest
 - [ ] 首次连接已核对容器host fingerprint。
 - [ ] workspace与dev-home由非零UID/GID拥有。
 - [ ] Stack没有挂载Docker socket、宿主私钥或宿主根目录。
+- [ ] personal代理开启时，Xray配置为root-only、inbound只监听容器loopback，宿主机没有10809映射。
+- [ ] `XRAY_PROXY_ENABLED` 只使用严格的 `"true"` 或 `"false"`，切换后已Recreate并验证对应出口。
 - [ ] 每次更新前都已记录当前运行镜像的 repository digest。
 - [ ] 更新镜像时使用Re-pull并重建，而不是仅Restart。

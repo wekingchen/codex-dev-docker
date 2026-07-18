@@ -12,6 +12,13 @@ if [ -n "$tracked_local_ssh" ]; then
   failed=true
 fi
 
+tracked_xray_config="$(git -C "$REPO_ROOT" ls-files -- '.xray/**' 'xray-config.json' 'xray/config.json')"
+if [ -n "$tracked_xray_config" ]; then
+  echo "禁止跟踪本地Xray节点配置：" >&2
+  printf '%s\n' "$tracked_xray_config" >&2
+  failed=true
+fi
+
 tracked_claude_state="$(git -C "$REPO_ROOT" ls-files -- \
   ':(glob)**/.claude/.credentials.json' \
   ':(glob)**/.claude/settings.local.json' \
@@ -64,6 +71,19 @@ if ! grep -Eq '^\.codex-ssh/?$' "$REPO_ROOT/.dockerignore"; then
   failed=true
 fi
 
+for path in .xray/config.json xray/config.json xray-config.json; do
+  if ! git -C "$REPO_ROOT" check-ignore -q "$path"; then
+    echo ".gitignore没有排除本地Xray配置：$path" >&2
+    failed=true
+  fi
+done
+for pattern in '.xray' 'xray/config.json' 'xray-config.json'; do
+  if ! grep -Fqx "$pattern" "$REPO_ROOT/.dockerignore"; then
+    echo ".dockerignore没有排除本地Xray配置：$pattern" >&2
+    failed=true
+  fi
+done
+
 for path in \
   .claude/.credentials.json \
   .claude/settings.local.json \
@@ -89,4 +109,4 @@ if [ "$failed" = true ]; then
   exit 1
 fi
 
-echo "秘密材料检查通过：未跟踪本地SSH目录、私钥或Claude认证状态。"
+echo "秘密材料检查通过：未跟踪本地SSH/Xray目录、私钥或Claude认证状态。"

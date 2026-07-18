@@ -50,6 +50,7 @@ output="$(docker run --rm --platform "$PLATFORM" \
     if [ -n "${SMOKE_EXPECT_CLAUDE_VERSION:-}" ]; then
       claude_path="$(command -v claude)"
       test "$claude_path" = /usr/local/bin/claude
+      ! command -v xray >/dev/null
       test "$(stat -c %u:%g "$claude_path")" = 0:0
       test "$(stat -c %a "$claude_path")" = 755
       test ! -w "$claude_path"
@@ -149,6 +150,7 @@ remap_output="$(docker run --rm --platform "$PLATFORM" \
     test -w "$CODEX_HOME"
     if [ -n "${SMOKE_EXPECT_CLAUDE_VERSION:-}" ]; then
       command -v claude >/dev/null
+      ! command -v xray >/dev/null
       test -f "$HOME/.claude/smoke-persist"
       test -w "$HOME/.claude"
     fi
