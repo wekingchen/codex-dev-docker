@@ -506,6 +506,9 @@ docker exec \
   if [ -n "$SMOKE_EXPECT_XRAY_VERSION" ]; then
     test "$(stat -c %U:%G /usr/local/bin/xray)" = root:root
     test "$(stat -c %a /usr/local/bin/xray)" = 755
+    test "$(stat -c %a /usr/local/share/xray)" = 755
+    gosu xray:xray test -r /usr/local/share/xray/geoip.dat
+    gosu xray:xray test -r /usr/local/share/xray/geosite.dat
     test "$(stat -c %U:%G /run/xray/config.json)" = root:xray
     test "$(stat -c %a /run/xray/config.json)" = 640
     test "$(/usr/local/bin/validate-xray-config.sh /run/xray/config.json)" = cn-direct

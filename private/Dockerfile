@@ -168,9 +168,14 @@ RUN set -eux; \
     fi; \
     groupadd --system --gid 65532 xray; \
     useradd --system --uid 65532 --gid xray --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin xray; \
+    chmod 0755 /usr/local/share /usr/local/share/xray; \
+    chmod 0644 /usr/local/share/xray/geoip.dat /usr/local/share/xray/geosite.dat; \
     test "$(/usr/local/bin/xray version | awk 'NR == 1 {print $2}')" = "${XRAY_VERSION}"; \
     test "$(stat -c %U:%G /usr/local/bin/xray)" = root:root; \
-    test "$(stat -c %a /usr/local/bin/xray)" = 755
+    test "$(stat -c %a /usr/local/bin/xray)" = 755; \
+    test "$(stat -c %a /usr/local/share/xray)" = 755; \
+    gosu xray:xray test -r /usr/local/share/xray/geoip.dat; \
+    gosu xray:xray test -r /usr/local/share/xray/geosite.dat
 
 # OpenSSH只采用第一条SetEnv；规范化已发布的旧父模板后，在唯一指令中扩展私有更新禁用变量。
 RUN set -eux; \
