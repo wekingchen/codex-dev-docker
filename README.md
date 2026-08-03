@@ -2,7 +2,7 @@
 
 这是一个用于运行 Codex CLI 的通用 Docker 开发环境。
 
-基础镜像只提供 Codex、mise、Git、SSH Client、Python 基础环境、编译工具和常用命令行工具。Node.js、Go、Rust、Java 等项目运行时由 Codex 根据项目配置在容器内按需安装。
+基础镜像预装 Codex、固定的 Node.js 24 LTS、Ubuntu Python、Git/Git LFS、mise、SSH Client、编译工具和常用命令行工具。项目指定的其他 Node/Python 版本以及 Go、Rust、Java 等运行时由 Codex 根据项目配置通过 mise 按需安装。
 
 ## 设计概览
 
@@ -48,9 +48,10 @@ GitHub Actions 在每次构建时从 `openai/codex` 官方 `releases/latest` API
 - 所有外部 GitHub Actions 固定到官方仓库的完整 40 位 commit SHA，并保留同行版本注释；checkout 不保留 Git 凭据。
 - `ubuntu:26.04` 同时保留可读 tag 和经过验证的多架构根 OCI index digest。
 - mise 固定官方 release，并分别校验 amd64、arm64 raw binary 的 SHA-256；不再执行 `curl https://mise.run | sh`。
+- Node.js 固定当前 Node 24 LTS 的精确官方 release，并分别校验 Linux x64、arm64 tarball 的 SHA-256；项目需要其他版本时仍可由 mise 覆盖。
 - registry candidate 会生成 BuildKit `mode=min` provenance 和 SBOM；promotion 前必须确认两者可读。
 - Trivy 分别扫描base与remote candidate根digest中的amd64、arm64 manifest，生成JSON、table和SARIF。base保持非阻断基线；remote若存在已有修复版本的CRITICAL漏洞会阻断promotion。扫描器、认证、manifest或报告生成失败始终阻断。
-- `.github/workflows/supply-chain-audit.yml` 每周只读检查 Actions SHA、Ubuntu digest、mise asset和 Trivy 版本漂移，不自动修改仓库或 registry。
+- `.github/workflows/supply-chain-audit.yml` 每周只读检查 Actions SHA、Ubuntu digest、mise asset、Node.js 24 LTS tarball 和 Trivy 版本漂移，不自动修改仓库或 registry。
 
 手动运行审计：
 
@@ -58,7 +59,7 @@ GitHub Actions 在每次构建时从 `openai/codex` 官方 `releases/latest` API
 ./scripts/audit-supply-chain.sh
 ```
 
-Dependabot继续更新 GitHub Actions 和 Docker tag；同 tag Ubuntu digest、mise 和 Trivy binary的漂移由审计 workflow提醒后人工更新，并重新通过完整双架构 candidate流程。
+Dependabot继续更新 GitHub Actions 和 Docker tag；同 tag Ubuntu digest、mise、Node.js 24 LTS 和 Trivy binary的漂移由审计 workflow提醒后人工更新，并重新通过完整双架构 candidate流程。
 
 ## 个人私有 Codex + Claude Code 双 CLI
 
@@ -285,17 +286,21 @@ codex
 
 ## 项目运行时
 
-示例：
+镜像默认可直接使用预装的 Node.js 24 LTS 和 Ubuntu Python：
 
 ```bash
-mise use node@lts python@3.12
-mise install
+node --version
+npm --version
+python --version
+git --version
+```
 
+如果项目通过 `mise.toml`、`.tool-versions`、`.node-version` 或其他配置指定了不同版本，再用 mise 切换：
+
+```bash
+mise install
 mise use go@latest
-mise install
-
 mise use rust@stable
-mise install
 ```
 
 不建议把 Flutter、Android SDK、OpenWrt 工具链、数据库服务端、浏览器测试环境等重型技术栈加入基础镜像，应按项目制作派生镜像。

@@ -12,6 +12,7 @@ PLATFORM="${3:-linux/amd64}"
 EXPECTED_MISE_VERSION="${4:-}"
 BASE_IMAGE="${5:-}"
 REMOTE_USER="${6:-dev}"
+EXPECTED_NODE_VERSION="${EXPECTED_NODE_VERSION:-}"
 EXPECTED_CLAUDE_VERSION="${EXPECTED_CLAUDE_VERSION:-}"
 EXPECTED_CLAUDE_SHA256="${EXPECTED_CLAUDE_SHA256:-}"
 EXPECTED_XRAY_VERSION="${EXPECTED_XRAY_VERSION:-}"
@@ -333,6 +334,36 @@ mise_output="$(mise --version)"
 printf "CODEX_VERSION=%s\n" "${codex_output##* }"
 printf "MISE_VERSION=%s\n" "${mise_output%% *}"
 
+command -v python >/dev/null
+command -v python3 >/dev/null
+command -v git >/dev/null
+python_version="$(python --version 2>&1)"
+pip_version="$(python3 -m pip --version)"
+git_version="$(git --version)"
+git_lfs_version="$(git lfs version)"
+venv_dir="$(mktemp -d)"
+python3 -m venv "$venv_dir"
+"$venv_dir/bin/python" -c "import sys; assert sys.version_info.major == 3"
+rm -rf "$venv_dir"
+printf "PYTHON_VERSION=%s\n" "$python_version"
+printf "PIP_VERSION=%s\n" "$pip_version"
+printf "GIT_VERSION=%s\n" "$git_version"
+printf "GIT_LFS_VERSION=%s\n" "$git_lfs_version"
+
+if [ -n "${SMOKE_EXPECT_NODE_VERSION:-}" ]; then
+  node_path="$(command -v node)"
+  npm_path="$(command -v npm)"
+  test "$node_path" = /usr/local/bin/node
+  test "$npm_path" = /usr/local/bin/npm
+  node_version="$(node --version)"
+  npm_version="$(npm --version)"
+  node_arch="$(node -p process.arch)"
+  node -e "process.exit(0)"
+  printf "NODE_VERSION=%s\n" "$node_version"
+  printf "NPM_VERSION=%s\n" "$npm_version"
+  printf "NODE_ARCH=%s\n" "$node_arch"
+fi
+
 if [ -n "${SMOKE_EXPECT_CLAUDE_VERSION:-}" ]; then
   claude_path="$(command -v claude)"
   test "$claude_path" = /usr/local/bin/claude
@@ -372,7 +403,7 @@ test -z "${SSH_AUTH_SOCK:-}"
 EOF
 )"
 printf -v remote_check_quoted '%q' "$remote_check_script"
-if ! output="$(ssh_run "EXPECTED_UID=$(id -u) EXPECTED_GID=$(id -g) EXPECTED_HOME=$REMOTE_HOME SMOKE_EXPECT_CLAUDE_VERSION=$EXPECTED_CLAUDE_VERSION SMOKE_EXPECT_XRAY_VERSION=$EXPECTED_XRAY_VERSION bash -lc $remote_check_quoted")"; then
+if ! output="$(ssh_run "EXPECTED_UID=$(id -u) EXPECTED_GID=$(id -g) EXPECTED_HOME=$REMOTE_HOME SMOKE_EXPECT_NODE_VERSION=$EXPECTED_NODE_VERSION SMOKE_EXPECT_CLAUDE_VERSION=$EXPECTED_CLAUDE_VERSION SMOKE_EXPECT_XRAY_VERSION=$EXPECTED_XRAY_VERSION bash -lc $remote_check_quoted")"; then
   docker logs "$CONTAINER_NAME" >&2 || true
   echo "正确公钥无法完成remote SSH smoke。" >&2
   exit 1
@@ -381,6 +412,10 @@ printf '%s\n' "$output"
 
 actual_version="$(awk -F= '$1 == "CODEX_VERSION" {print $2; exit}' <<< "$output")"
 actual_mise_version="$(awk -F= '$1 == "MISE_VERSION" {print $2; exit}' <<< "$output")"
+actual_node_version="$(awk -F= '$1 == "NODE_VERSION" {print $2; exit}' <<< "$output")"
+actual_node_arch="$(awk -F= '$1 == "NODE_ARCH" {print $2; exit}' <<< "$output")"
+actual_python_version="$(awk -F= '$1 == "PYTHON_VERSION" {print $2; exit}' <<< "$output")"
+actual_git_version="$(awk -F= '$1 == "GIT_VERSION" {print $2; exit}' <<< "$output")"
 actual_claude_version="$(awk -F= '$1 == "CLAUDE_VERSION" {print $2; exit}' <<< "$output")"
 actual_claude_sha256="$(awk -F= '$1 == "CLAUDE_SHA256" {print $2; exit}' <<< "$output")"
 actual_xray_version="$(awk -F= '$1 == "XRAY_VERSION" {print $2; exit}' <<< "$output")"
@@ -394,6 +429,26 @@ fi
 if [ -n "$EXPECTED_MISE_VERSION" ] && [ "$actual_mise_version" != "$EXPECTED_MISE_VERSION" ]; then
   echo "mise版本不匹配：期望$EXPECTED_MISE_VERSION，实际${actual_mise_version:-<无法读取>}" >&2
   exit 1
+fi
+
+if [ -z "$actual_python_version" ] || [ -z "$actual_git_version" ]; then
+  echo "无法从remote smoke输出解析Python或Git版本。" >&2
+  exit 1
+fi
+
+if [ -n "$EXPECTED_NODE_VERSION" ]; then
+  if [ "$actual_node_version" != "$EXPECTED_NODE_VERSION" ]; then
+    echo "Node.js版本不匹配：期望$EXPECTED_NODE_VERSION，实际${actual_node_version:-<无法读取>}" >&2
+    exit 1
+  fi
+
+  case "$PLATFORM:$actual_node_arch" in
+    linux/amd64:x64|linux/arm64:arm64) ;;
+    *)
+      echo "Node.js架构不匹配：平台$PLATFORM，Node.js报告${actual_node_arch:-<无法读取>}" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 if [ -n "$EXPECTED_CLAUDE_VERSION" ]; then
@@ -597,10 +652,11 @@ if [ -n "$BASE_IMAGE" ]; then
     "$BASE_IMAGE" true
 fi
 
+tool_summary="Node.js ${actual_node_version:-未要求}, ${actual_python_version}, ${actual_git_version}"
 if [ -n "$EXPECTED_XRAY_VERSION" ]; then
-  echo "remote SSH smoke通过：$REMOTE_IMAGE ($PLATFORM, Codex $actual_version, Claude Code $actual_claude_version, Xray $actual_xray_version, mise $actual_mise_version, proxy on/off)"
+  echo "remote SSH smoke通过：$REMOTE_IMAGE ($PLATFORM, Codex $actual_version, Claude Code $actual_claude_version, Xray $actual_xray_version, mise $actual_mise_version, $tool_summary, proxy on/off)"
 elif [ -n "$EXPECTED_CLAUDE_VERSION" ]; then
-  echo "remote SSH smoke通过：$REMOTE_IMAGE ($PLATFORM, Codex $actual_version, Claude Code $actual_claude_version, mise $actual_mise_version)"
+  echo "remote SSH smoke通过：$REMOTE_IMAGE ($PLATFORM, Codex $actual_version, Claude Code $actual_claude_version, mise $actual_mise_version, $tool_summary)"
 else
-  echo "remote SSH smoke通过：$REMOTE_IMAGE ($PLATFORM, Codex $actual_version, mise $actual_mise_version)"
+  echo "remote SSH smoke通过：$REMOTE_IMAGE ($PLATFORM, Codex $actual_version, mise $actual_mise_version, $tool_summary)"
 fi

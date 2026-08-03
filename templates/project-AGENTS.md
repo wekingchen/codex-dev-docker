@@ -17,8 +17,9 @@
 
 ## 语言运行时
 
-- 优先使用 `mise` 安装 Node、Python、Go、Rust、Java 等语言运行时。
-- 如果项目没有指定版本，优先选择当前稳定版或 LTS 版，并在执行前说明选择理由。
+- 容器已预装默认的 Node.js LTS 和 Ubuntu Python；项目未指定其他版本且兼容时直接使用。
+- 如果 `mise.toml`、`.tool-versions`、`.node-version`、`package.json#engines` 或项目文档指定了不同版本，通过 `mise` 安装和切换。
+- Go、Rust、Java 等未预装运行时优先通过 `mise` 安装。
 - 不要把重型 SDK 全局安装到系统里，除非项目确实需要。
 
 ## 项目依赖

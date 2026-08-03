@@ -4,6 +4,7 @@ set -euo pipefail
 BASE_IMAGE="${1:-${PUBLIC_BASE_IMAGE:-ghcr.io/wekingchen/codex-dev-base:latest}}"
 REMOTE_IMAGE="${2:-${PUBLIC_REMOTE_IMAGE:-ghcr.io/wekingchen/codex-dev-remote:latest}}"
 EXPECTED_SOURCE="${EXPECTED_PUBLIC_IMAGE_SOURCE:-https://github.com/wekingchen/codex-dev-docker}"
+ALLOW_LEGACY_NODE_PARENT="${ALLOW_LEGACY_NODE_PARENT:-false}"
 TEMP_DIR="$(mktemp -d)"
 
 cleanup() {
@@ -20,6 +21,11 @@ require_command() {
 
 require_command docker
 require_command jq
+
+if [ "$ALLOW_LEGACY_NODE_PARENT" != true ] && [ "$ALLOW_LEGACY_NODE_PARENT" != false ]; then
+  echo "ALLOW_LEGACY_NODE_PARENT只能为true或false。" >&2
+  exit 1
+fi
 
 resolve_root_digest() {
   local image_ref="$1"
@@ -163,6 +169,69 @@ for labels_file in "${label_files[@]}"; do
   require_label "$labels_file" io.codex-dev.codex.version >/dev/null
 done
 
+node_keys=(
+  io.codex-dev.node.source
+  io.codex-dev.node.version
+  io.codex-dev.node.sha256-amd64
+  io.codex-dev.node.sha256-arm64
+)
+node_complete_files=0
+node_present_values=0
+for labels_file in "${label_files[@]}"; do
+  complete=true
+  for key in "${node_keys[@]}"; do
+    if [ -n "$(label_value "$labels_file" "$key")" ]; then
+      node_present_values=$((node_present_values + 1))
+    else
+      complete=false
+    fi
+  done
+  if [ "$complete" = true ]; then
+    node_complete_files=$((node_complete_files + 1))
+  fi
+done
+
+node_source=""
+node_version=""
+node_sha256_amd64=""
+node_sha256_arm64=""
+if [ "$node_complete_files" -eq "${#label_files[@]}" ]; then
+  node_reference_labels="${TEMP_DIR}/base-amd64-labels.json"
+  node_source="$(require_label "$node_reference_labels" io.codex-dev.node.source)"
+  node_version="$(require_label "$node_reference_labels" io.codex-dev.node.version)"
+  node_sha256_amd64="$(require_label "$node_reference_labels" io.codex-dev.node.sha256-amd64)"
+  node_sha256_arm64="$(require_label "$node_reference_labels" io.codex-dev.node.sha256-arm64)"
+
+  if [ "$node_source" != "https://nodejs.org/dist" ]; then
+    echo "公开父镜像Node.js source不正确：$node_source" >&2
+    exit 1
+  fi
+  if ! [[ "$node_version" =~ ^v24\.[0-9]+\.[0-9]+$ ]]; then
+    echo "公开父镜像Node.js版本label无效：$node_version" >&2
+    exit 1
+  fi
+  if ! [[ "$node_sha256_amd64" =~ ^[0-9a-f]{64}$ ]] || ! [[ "$node_sha256_arm64" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "公开父镜像Node.js双架构SHA-256 label无效。" >&2
+    exit 1
+  fi
+
+  for labels_file in "${label_files[@]}"; do
+    for key in "${node_keys[@]}"; do
+      expected="$(label_value "$node_reference_labels" "$key")"
+      actual="$(label_value "$labels_file" "$key")"
+      if [ "$actual" != "$expected" ]; then
+        echo "公开父镜像Node.js配对失败：${key}期望${expected}，实际${actual}（${labels_file}）" >&2
+        exit 1
+      fi
+    done
+  done
+elif [ "$node_present_values" -eq 0 ] && [ "$ALLOW_LEGACY_NODE_PARENT" = true ]; then
+  echo "警告：公开父镜像尚无Node.js labels；仅为pull_request兼容旧public latest，跳过Node.js父镜像断言。" >&2
+else
+  echo "公开父镜像缺少完整一致的Node.js labels；拒绝继续。" >&2
+  exit 1
+fi
+
 for labels_file in "${TEMP_DIR}/base-amd64-labels.json" "${TEMP_DIR}/base-arm64-labels.json"; do
   if [ "$(require_label "$labels_file" io.codex-dev.image.role)" != base ]; then
     echo "公开 base 平台镜像 role 不正确：$labels_file" >&2
@@ -220,3 +289,7 @@ emit_output revision "$revision"
 emit_output codex_release_id "$codex_release_id"
 emit_output codex_release_tag "$codex_release_tag"
 emit_output codex_version "$codex_version"
+emit_output node_source "$node_source"
+emit_output node_version "$node_version"
+emit_output node_sha256_amd64 "$node_sha256_amd64"
+emit_output node_sha256_arm64 "$node_sha256_arm64"

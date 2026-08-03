@@ -15,6 +15,7 @@
   - curl / wget
   - sudo
   - build-essential
+  - 固定的 Node.js LTS
   - Python 基础环境
   - mise
   - 常用排错工具
@@ -44,7 +45,7 @@
    - pom.xml / build.gradle / gradle.lockfile
    - Dockerfile / compose.yaml
    - mise.toml / .tool-versions
-2. 优先使用 `mise` 安装语言运行时。
+2. 项目未指定版本或版本兼容时，优先使用镜像预装的 Node.js LTS 和 Ubuntu Python；项目要求其他版本时再使用 `mise` 安装和切换。
 3. 优先使用项目自身的依赖安装方式：
    - Node：根据 lockfile 使用 npm / pnpm / yarn
    - Python：根据项目文件使用 venv + pip / uv / poetry
@@ -62,6 +63,7 @@
 - Docker 基础镜像必须同时保留可读 tag 和经过验证的多架构根 index digest；禁止使用单平台子 manifest digest替代根 index。
 - 安装第三方工具不得执行未经校验的浮动远程 shell 脚本。
 - mise 必须固定官方 release，并分别校验 amd64、arm64 asset 的 SHA-256；两个架构必须在同一提交中更新。
+- Node.js 必须固定当前 Node 24 LTS 的精确官方 release，并分别校验 Linux x64、arm64 tarball 的 SHA-256；版本与两个摘要必须在同一提交中更新。
 - Codex CLI 是明确例外：必须继续动态解析 `openai/codex` 官方 latest，并通过官方 installer 安装，不得在仓库中静态固定版本。
 - Claude Code只能进入owner本人使用的独立private GHCR package；公开base/remote package、Compose默认值和公开模板 `templates/portainer-stack.yaml` 不得包含Claude二进制或指向private package。`templates/portainer-personal-stack.yaml` 是owner-only private package的明确例外。
 - Claude Code必须解析官方精确版本，固定release key指纹，验证`manifest.json.sig`与平台checksum/size；禁止执行浮动bootstrap或`curl | sh`。

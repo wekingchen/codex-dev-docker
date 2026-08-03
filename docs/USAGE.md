@@ -98,7 +98,8 @@ CI 发布过程：
 - runner固定为 `ubuntu-24.04`；这只固定 OS label，不固定 GitHub runner VM镜像内容。
 - Dockerfile 的 Ubuntu使用 tag+多架构根 index digest。
 - mise固定官方 release，并分别校验 amd64、arm64 asset SHA-256。
-- Codex继续动态追踪 official latest，不与 mise采用相同的静态固定策略。
+- Node.js固定当前 Node 24 LTS 的精确官方 release，并分别校验 Linux x64、arm64 tarball SHA-256。
+- Codex继续动态追踪 official latest，不与 mise或 Node.js 采用相同的静态固定策略。
 
 Base与remote candidate push都会生成BuildKit `mode=min` provenance和SBOM。随后CI按各自不可变根digest验证：
 
@@ -116,7 +117,7 @@ Base Trivy保持初始非阻断基线：报告HIGH/CRITICAL，但漏洞数量不
 ./scripts/audit-supply-chain.sh
 ```
 
-它会检查Actions tag/SHA对应关系、Ubuntu根digest和平台、mise最新稳定release及双架构checksum、Trivy固定版本。Codex不做静态版本比较，因为其official latest检查属于构建workflow。
+它会检查Actions tag/SHA对应关系、Ubuntu根digest和平台、mise最新稳定release及双架构checksum、当前 Node 24 LTS及其双架构tarball checksum、Trivy固定版本。Codex不做静态版本比较，因为其official latest检查属于构建workflow。
 
 ### 3.2 个人私有 Claude Code 派生镜像
 
@@ -320,7 +321,7 @@ claude auth status --text
 
 Claude状态保存在 `/home/dev/.claude` 与 `/home/dev/.claude.json`；不要把API key或OAuth token写入仓库 `.env`。
 
-建议让 Codex 或 Claude Code先读取 README、lockfile、`package.json`、`pyproject.toml`、`go.mod`、`Cargo.toml`、`Dockerfile`、`mise.toml`，再通过 mise 和项目原生包管理器安装依赖。
+建议让 Codex 或 Claude Code先读取 README、lockfile、`package.json`、`pyproject.toml`、`go.mod`、`Cargo.toml`、`Dockerfile`、`mise.toml`。项目未指定其他版本时直接使用预装的 Node.js LTS 和 Ubuntu Python；版本不兼容时再通过 mise 切换，并使用项目原生包管理器安装依赖。
 
 新项目可以复制指令模板：
 
@@ -407,9 +408,13 @@ docker compose -f compose.yaml -f compose.remote.yaml --profile remote config
 本地镜像 smoke：
 
 ```bash
-./scripts/smoke-image.sh <base镜像> <期望-Codex-版本> linux/amd64 <期望-mise-版本>
-./scripts/smoke-remote-ssh.sh <remote镜像> <期望-Codex-版本> linux/amd64 <期望-mise-版本> <base镜像>
+EXPECTED_NODE_VERSION=<期望-Node-版本> \
+  ./scripts/smoke-image.sh <base镜像> <期望-Codex-版本> linux/amd64 <期望-mise-版本>
+EXPECTED_NODE_VERSION=<期望-Node-版本> \
+  ./scripts/smoke-remote-ssh.sh <remote镜像> <期望-Codex-版本> linux/amd64 <期望-mise-版本> <base镜像>
 ```
+
+`EXPECTED_NODE_VERSION` 应与 `base/Dockerfile` 中固定的 Node.js 版本一致；smoke 还会验证 Python、pip/venv、Git 和 Git LFS。
 
 Candidate构建证明：
 
