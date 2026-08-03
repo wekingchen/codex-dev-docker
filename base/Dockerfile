@@ -11,6 +11,9 @@ ARG MISE_SHA256_ARM64=1b4ef061d25f0ceb508f11169482f3074e55c1698a1494f666386b2fcf
 ARG NODE_VERSION=v24.19.0
 ARG NODE_SHA256_AMD64=14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647
 ARG NODE_SHA256_ARM64=01443c1e1a29e531ccad5a46fefa6df490d2189c49f7955904aecdbb0fe86fdc
+ARG NPM_VERSION=12.0.2
+ARG NPM_SHA512=b885e890b9418fa1693544d05f53e64f9a73ec194837d4258b15fecdd692347b1dd2a517b1b0cbaf9d31cd8e92c3b70956bd2ecc72833a57b4b3098f5bfa7943
+ARG NPM_TAR_VERSION=7.5.19
 ARG CODEX_RELEASE=latest
 ARG CODEX_RELEASE_ID=latest
 ARG CODEX_RELEASE_TAG=latest
@@ -144,7 +147,7 @@ RUN set -eux; \
 USER root
 WORKDIR /home/${USERNAME}
 
-# Node.js：固定官方 LTS release 和两个目标架构的 SHA-256，不使用浮动安装脚本。
+# Node.js：固定官方 LTS 双架构资产；npm固定官方registry tarball，避免继承Node发行包中的已知漏洞依赖。
 RUN set -eux; \
     case "${TARGETARCH}" in \
         amd64) NODE_ARCH="x64"; NODE_SHA256="${NODE_SHA256_AMD64}" ;; \
@@ -158,8 +161,18 @@ RUN set -eux; \
     printf '%s  %s\n' "${NODE_SHA256}" "/tmp/${NODE_ASSET}" | sha256sum --check --strict; \
     tar --extract --xz --file "/tmp/${NODE_ASSET}" --directory /usr/local --strip-components=1 --no-same-owner; \
     rm -f "/tmp/${NODE_ASSET}"; \
+    NPM_ASSET="npm-${NPM_VERSION}.tgz"; \
+    curl --fail --location --silent --show-error --retry 3 \
+        "https://registry.npmjs.org/npm/-/${NPM_ASSET}" \
+        --output "/tmp/${NPM_ASSET}"; \
+    printf '%s  %s\n' "${NPM_SHA512}" "/tmp/${NPM_ASSET}" | sha512sum --check --strict; \
+    rm -rf /usr/local/lib/node_modules/npm; \
+    install -d -m 0755 /usr/local/lib/node_modules/npm; \
+    tar --extract --gzip --file "/tmp/${NPM_ASSET}" --directory /usr/local/lib/node_modules/npm --strip-components=1 --no-same-owner; \
+    rm -f "/tmp/${NPM_ASSET}"; \
     test "$(node --version)" = "${NODE_VERSION}"; \
-    npm --version
+    test "$(npm --version)" = "${NPM_VERSION}"; \
+    test "$(jq -r '.version' /usr/local/lib/node_modules/npm/node_modules/tar/package.json)" = "${NPM_TAR_VERSION}"
 
 # mise：固定官方 release 和两个目标架构的 SHA-256，不执行浮动远程安装脚本。
 RUN set -eux; \
@@ -200,6 +213,10 @@ LABEL io.codex-dev.mise.source="https://github.com/jdx/mise" \
       io.codex-dev.node.version="${NODE_VERSION}" \
       io.codex-dev.node.sha256-amd64="${NODE_SHA256_AMD64}" \
       io.codex-dev.node.sha256-arm64="${NODE_SHA256_ARM64}" \
+      io.codex-dev.npm.source="https://registry.npmjs.org/npm" \
+      io.codex-dev.npm.version="${NPM_VERSION}" \
+      io.codex-dev.npm.sha512="${NPM_SHA512}" \
+      io.codex-dev.npm.tar-version="${NPM_TAR_VERSION}" \
       io.codex-dev.codex.source="https://github.com/openai/codex" \
       io.codex-dev.codex.release-id="${CODEX_RELEASE_ID}" \
       io.codex-dev.codex.release-tag="${CODEX_RELEASE_TAG}" \

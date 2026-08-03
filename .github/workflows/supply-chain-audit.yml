@@ -3,7 +3,7 @@ name: 审计供应链固定项
 on:
   workflow_dispatch:
   schedule:
-    # 每周一 UTC 04:13 检查 Actions、Ubuntu、mise、Node.js LTS 和 Trivy 漂移。
+    # 每周一 UTC 04:13 检查 Actions、Ubuntu、mise、Node.js LTS、npm 和 Trivy 漂移。
     - cron: "13 4 * * 1"
 
 permissions:

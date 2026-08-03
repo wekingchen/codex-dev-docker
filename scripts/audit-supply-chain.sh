@@ -13,7 +13,7 @@ require_command() {
   fi
 }
 
-for command_name in curl git grep jq; do
+for command_name in curl git grep jq sha512sum tar; do
   require_command "$command_name"
 done
 
@@ -190,6 +190,50 @@ elif [ "$node_sha_arm64" != "$official_node_sha_arm64" ]; then
   report_error "Node.js ${node_version} arm64 SHA不匹配：官方 ${official_node_sha_arm64}，仓库 ${node_sha_arm64}"
 else
   report_ok "Node.js $node_version 为当前 Node 24 LTS，双架构 tarball SHA-256 与官方 SHASUMS256.txt 一致"
+fi
+
+# npm 独立固定官方registry tarball，避免继承Node发行包中存在可修复漏洞的嵌套依赖。
+npm_version="$(grep -E '^ARG NPM_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' "$REPO_ROOT/base/Dockerfile" | cut -d= -f2 || true)"
+npm_sha512="$(grep -E '^ARG NPM_SHA512=[0-9a-f]{128}$' "$REPO_ROOT/base/Dockerfile" | cut -d= -f2 || true)"
+npm_tar_version="$(grep -E '^ARG NPM_TAR_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' "$REPO_ROOT/base/Dockerfile" | cut -d= -f2 || true)"
+workflow_npm_version="$(grep -E '^[[:space:]]+NPM_VERSION: "[0-9]+\.[0-9]+\.[0-9]+"$' "$REPO_ROOT/.github/workflows/docker.yml" | sed -E 's/.*"([^"]+)"/\1/' || true)"
+npm_latest_metadata="$(curl --fail --silent --show-error --retry 3 https://registry.npmjs.org/npm/latest)"
+latest_npm_version="$(jq -r '.version // empty' <<< "$npm_latest_metadata")"
+npm_exact_metadata=""
+npm_dist_tarball=""
+npm_dependency_tar=""
+official_npm_sha512=""
+bundled_npm_tar_version=""
+
+if [ -n "$npm_version" ]; then
+  npm_exact_metadata="$(curl --fail --silent --show-error --retry 3 \
+    "https://registry.npmjs.org/npm/${npm_version}")"
+  npm_dist_tarball="$(jq -r '.dist.tarball // empty' <<< "$npm_exact_metadata")"
+  npm_dependency_tar="$(jq -r '.dependencies.tar // empty' <<< "$npm_exact_metadata")"
+  npm_temp_dir="$(mktemp -d)"
+  curl --fail --location --silent --show-error --retry 3 \
+    "$npm_dist_tarball" --output "${npm_temp_dir}/npm.tgz"
+  official_npm_sha512="$(sha512sum "${npm_temp_dir}/npm.tgz" | cut -d' ' -f1)"
+  bundled_npm_tar_version="$(tar -xOf "${npm_temp_dir}/npm.tgz" package/node_modules/tar/package.json | jq -r '.version // empty')"
+  rm -rf "$npm_temp_dir"
+fi
+
+if [ -z "$npm_version" ] || [ -z "$npm_sha512" ] || [ -z "$npm_tar_version" ]; then
+  report_error "Dockerfile 中 npm 版本、SHA-512或内置tar版本缺失"
+elif [ "$workflow_npm_version" != "$npm_version" ]; then
+  report_error "Dockerfile 与 docker workflow 的 npm 版本不一致：Dockerfile ${npm_version}，workflow ${workflow_npm_version:-<缺失>}"
+elif [ "$npm_version" != "$latest_npm_version" ]; then
+  report_error "npm 已有新稳定版本：官方 ${latest_npm_version}，仓库 ${npm_version}"
+elif [ "$npm_dist_tarball" != "https://registry.npmjs.org/npm/-/npm-${npm_version}.tgz" ]; then
+  report_error "npm ${npm_version} 官方tarball URL异常：${npm_dist_tarball:-<缺失>}"
+elif [ "$npm_sha512" != "$official_npm_sha512" ]; then
+  report_error "npm ${npm_version} SHA-512不匹配：官方 ${official_npm_sha512}，仓库 ${npm_sha512}"
+elif [ "$npm_dependency_tar" != "^${npm_tar_version}" ]; then
+  report_error "npm ${npm_version} 声明的tar依赖不匹配：期望^${npm_tar_version}，实际${npm_dependency_tar:-<缺失>}"
+elif [ "$bundled_npm_tar_version" != "$npm_tar_version" ]; then
+  report_error "npm ${npm_version} 内置tar版本不匹配：期望${npm_tar_version}，实际${bundled_npm_tar_version:-<缺失>}"
+else
+  report_ok "npm $npm_version 官方tarball SHA-512有效，内置tar固定为已修复版本 $npm_tar_version"
 fi
 
 # Trivy binary固定版本应跟随官方最新稳定release；Action pin由通用检查覆盖。

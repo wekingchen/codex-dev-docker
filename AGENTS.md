@@ -64,6 +64,7 @@
 - 安装第三方工具不得执行未经校验的浮动远程 shell 脚本。
 - mise 必须固定官方 release，并分别校验 amd64、arm64 asset 的 SHA-256；两个架构必须在同一提交中更新。
 - Node.js 必须固定当前 Node 24 LTS 的精确官方 release，并分别校验 Linux x64、arm64 tarball 的 SHA-256；版本与两个摘要必须在同一提交中更新。
+- npm若独立于Node发行包升级，必须固定官方registry精确版本和tarball SHA-512，并验证关键内置依赖版本；不得使用浮动 `npm@latest` 安装。
 - Codex CLI 是明确例外：必须继续动态解析 `openai/codex` 官方 latest，并通过官方 installer 安装，不得在仓库中静态固定版本。
 - Claude Code只能进入owner本人使用的独立private GHCR package；公开base/remote package、Compose默认值和公开模板 `templates/portainer-stack.yaml` 不得包含Claude二进制或指向private package。`templates/portainer-personal-stack.yaml` 是owner-only private package的明确例外。
 - Claude Code必须解析官方精确版本，固定release key指纹，验证`manifest.json.sig`与平台checksum/size；禁止执行浮动bootstrap或`curl | sh`。

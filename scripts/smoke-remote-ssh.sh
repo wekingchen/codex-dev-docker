@@ -13,6 +13,7 @@ EXPECTED_MISE_VERSION="${4:-}"
 BASE_IMAGE="${5:-}"
 REMOTE_USER="${6:-dev}"
 EXPECTED_NODE_VERSION="${EXPECTED_NODE_VERSION:-}"
+EXPECTED_NPM_VERSION="${EXPECTED_NPM_VERSION:-}"
 EXPECTED_CLAUDE_VERSION="${EXPECTED_CLAUDE_VERSION:-}"
 EXPECTED_CLAUDE_SHA256="${EXPECTED_CLAUDE_SHA256:-}"
 EXPECTED_XRAY_VERSION="${EXPECTED_XRAY_VERSION:-}"
@@ -357,6 +358,9 @@ if [ -n "${SMOKE_EXPECT_NODE_VERSION:-}" ]; then
   test "$npm_path" = /usr/local/bin/npm
   node_version="$(node --version)"
   npm_version="$(npm --version)"
+  if [ -n "${SMOKE_EXPECT_NPM_VERSION:-}" ]; then
+    test "$npm_version" = "$SMOKE_EXPECT_NPM_VERSION"
+  fi
   node_arch="$(node -p process.arch)"
   node -e "process.exit(0)"
   printf "NODE_VERSION=%s\n" "$node_version"
@@ -403,7 +407,7 @@ test -z "${SSH_AUTH_SOCK:-}"
 EOF
 )"
 printf -v remote_check_quoted '%q' "$remote_check_script"
-if ! output="$(ssh_run "EXPECTED_UID=$(id -u) EXPECTED_GID=$(id -g) EXPECTED_HOME=$REMOTE_HOME SMOKE_EXPECT_NODE_VERSION=$EXPECTED_NODE_VERSION SMOKE_EXPECT_CLAUDE_VERSION=$EXPECTED_CLAUDE_VERSION SMOKE_EXPECT_XRAY_VERSION=$EXPECTED_XRAY_VERSION bash -lc $remote_check_quoted")"; then
+if ! output="$(ssh_run "EXPECTED_UID=$(id -u) EXPECTED_GID=$(id -g) EXPECTED_HOME=$REMOTE_HOME SMOKE_EXPECT_NODE_VERSION=$EXPECTED_NODE_VERSION SMOKE_EXPECT_NPM_VERSION=$EXPECTED_NPM_VERSION SMOKE_EXPECT_CLAUDE_VERSION=$EXPECTED_CLAUDE_VERSION SMOKE_EXPECT_XRAY_VERSION=$EXPECTED_XRAY_VERSION bash -lc $remote_check_quoted")"; then
   docker logs "$CONTAINER_NAME" >&2 || true
   echo "正确公钥无法完成remote SSH smoke。" >&2
   exit 1
@@ -413,6 +417,7 @@ printf '%s\n' "$output"
 actual_version="$(awk -F= '$1 == "CODEX_VERSION" {print $2; exit}' <<< "$output")"
 actual_mise_version="$(awk -F= '$1 == "MISE_VERSION" {print $2; exit}' <<< "$output")"
 actual_node_version="$(awk -F= '$1 == "NODE_VERSION" {print $2; exit}' <<< "$output")"
+actual_npm_version="$(awk -F= '$1 == "NPM_VERSION" {print $2; exit}' <<< "$output")"
 actual_node_arch="$(awk -F= '$1 == "NODE_ARCH" {print $2; exit}' <<< "$output")"
 actual_python_version="$(awk -F= '$1 == "PYTHON_VERSION" {print $2; exit}' <<< "$output")"
 actual_git_version="$(awk -F= '$1 == "GIT_VERSION" {print $2; exit}' <<< "$output")"
@@ -439,6 +444,11 @@ fi
 if [ -n "$EXPECTED_NODE_VERSION" ]; then
   if [ "$actual_node_version" != "$EXPECTED_NODE_VERSION" ]; then
     echo "Node.js版本不匹配：期望$EXPECTED_NODE_VERSION，实际${actual_node_version:-<无法读取>}" >&2
+    exit 1
+  fi
+
+  if [ -n "$EXPECTED_NPM_VERSION" ] && [ "$actual_npm_version" != "$EXPECTED_NPM_VERSION" ]; then
+    echo "npm版本不匹配：期望$EXPECTED_NPM_VERSION，实际${actual_npm_version:-<无法读取>}" >&2
     exit 1
   fi
 
@@ -652,7 +662,7 @@ if [ -n "$BASE_IMAGE" ]; then
     "$BASE_IMAGE" true
 fi
 
-tool_summary="Node.js ${actual_node_version:-未要求}, ${actual_python_version}, ${actual_git_version}"
+tool_summary="Node.js ${actual_node_version:-未要求}, npm ${actual_npm_version:-未要求}, ${actual_python_version}, ${actual_git_version}"
 if [ -n "$EXPECTED_XRAY_VERSION" ]; then
   echo "remote SSH smoke通过：$REMOTE_IMAGE ($PLATFORM, Codex $actual_version, Claude Code $actual_claude_version, Xray $actual_xray_version, mise $actual_mise_version, $tool_summary, proxy on/off)"
 elif [ -n "$EXPECTED_CLAUDE_VERSION" ]; then

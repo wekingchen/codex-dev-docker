@@ -11,6 +11,7 @@ EXPECTED_VERSION="${2:-latest}"
 PLATFORM="${3:-linux/amd64}"
 EXPECTED_MISE_VERSION="${4:-}"
 EXPECTED_NODE_VERSION="${EXPECTED_NODE_VERSION:-}"
+EXPECTED_NPM_VERSION="${EXPECTED_NPM_VERSION:-}"
 EXPECTED_CLAUDE_VERSION="${EXPECTED_CLAUDE_VERSION:-}"
 EXPECTED_CLAUDE_SHA256="${EXPECTED_CLAUDE_SHA256:-}"
 HOME_VOLUME="codex-smoke-home-$$-${RANDOM:-0}"
@@ -31,6 +32,7 @@ docker run --rm --platform "$PLATFORM" \
 output="$(docker run --rm --platform "$PLATFORM" \
   --volume "$HOME_VOLUME:/home/dev" \
   --env "SMOKE_EXPECT_NODE_VERSION=$EXPECTED_NODE_VERSION" \
+  --env "SMOKE_EXPECT_NPM_VERSION=$EXPECTED_NPM_VERSION" \
   --env "SMOKE_EXPECT_CLAUDE_VERSION=$EXPECTED_CLAUDE_VERSION" \
   "$IMAGE" bash -lc '
     set -euo pipefail
@@ -72,6 +74,9 @@ output="$(docker run --rm --platform "$PLATFORM" \
       test "$npm_path" = /usr/local/bin/npm
       node_version="$(node --version)"
       npm_version="$(npm --version)"
+      if [ -n "${SMOKE_EXPECT_NPM_VERSION:-}" ]; then
+        test "$npm_version" = "$SMOKE_EXPECT_NPM_VERSION"
+      fi
       node_arch="$(node -p process.arch)"
       node -e "process.exit(0)"
       printf "NODE_VERSION=%s\n" "$node_version"
@@ -111,6 +116,7 @@ printf '%s\n' "$output"
 actual_version=""
 actual_mise_version=""
 actual_node_version=""
+actual_npm_version=""
 actual_node_arch=""
 actual_python_version=""
 actual_git_version=""
@@ -122,6 +128,7 @@ while IFS= read -r line; do
     CODEX_VERSION=*) actual_version="${line#*=}" ;;
     MISE_VERSION=*) actual_mise_version="${line#*=}" ;;
     NODE_VERSION=*) actual_node_version="${line#*=}" ;;
+    NPM_VERSION=*) actual_npm_version="${line#*=}" ;;
     NODE_ARCH=*) actual_node_arch="${line#*=}" ;;
     PYTHON_VERSION=*) actual_python_version="${line#*=}" ;;
     GIT_VERSION=*) actual_git_version="${line#*=}" ;;
@@ -159,6 +166,11 @@ fi
 if [ -n "$EXPECTED_NODE_VERSION" ]; then
   if [ "$actual_node_version" != "$EXPECTED_NODE_VERSION" ]; then
     echo "Node.js 版本不匹配：期望 $EXPECTED_NODE_VERSION，实际 ${actual_node_version:-<无法读取>}" >&2
+    exit 1
+  fi
+
+  if [ -n "$EXPECTED_NPM_VERSION" ] && [ "$actual_npm_version" != "$EXPECTED_NPM_VERSION" ]; then
+    echo "npm 版本不匹配：期望 $EXPECTED_NPM_VERSION，实际 ${actual_npm_version:-<无法读取>}" >&2
     exit 1
   fi
 
@@ -202,6 +214,7 @@ remap_output="$(docker run --rm --platform "$PLATFORM" \
   --env HOST_UID=12345 \
   --env HOST_GID=12345 \
   --env "SMOKE_EXPECT_NODE_VERSION=$EXPECTED_NODE_VERSION" \
+  --env "SMOKE_EXPECT_NPM_VERSION=$EXPECTED_NPM_VERSION" \
   --env "SMOKE_EXPECT_CLAUDE_VERSION=$EXPECTED_CLAUDE_VERSION" \
   "$IMAGE" bash -lc '
     set -euo pipefail
@@ -215,7 +228,11 @@ remap_output="$(docker run --rm --platform "$PLATFORM" \
     git --version >/dev/null
     if [ -n "${SMOKE_EXPECT_NODE_VERSION:-}" ]; then
       test "$(node --version)" = "$SMOKE_EXPECT_NODE_VERSION"
-      npm --version >/dev/null
+      if [ -n "${SMOKE_EXPECT_NPM_VERSION:-}" ]; then
+        test "$(npm --version)" = "$SMOKE_EXPECT_NPM_VERSION"
+      else
+        npm --version >/dev/null
+      fi
     fi
     if [ -n "${SMOKE_EXPECT_CLAUDE_VERSION:-}" ]; then
       command -v claude >/dev/null
@@ -227,7 +244,7 @@ remap_output="$(docker run --rm --platform "$PLATFORM" \
   ')"
 printf '%s\n' "$remap_output"
 
-tool_summary="Node.js ${actual_node_version:-未要求}, ${actual_python_version}, ${actual_git_version}"
+tool_summary="Node.js ${actual_node_version:-未要求}, npm ${actual_npm_version:-未要求}, ${actual_python_version}, ${actual_git_version}"
 if [ -n "$EXPECTED_CLAUDE_VERSION" ]; then
   echo "镜像 smoke test 通过：$IMAGE ($PLATFORM, Codex $actual_version, Claude Code $actual_claude_version, mise $actual_mise_version, $tool_summary)"
 else

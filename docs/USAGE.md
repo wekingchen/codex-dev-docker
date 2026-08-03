@@ -99,7 +99,8 @@ CI 发布过程：
 - Dockerfile 的 Ubuntu使用 tag+多架构根 index digest。
 - mise固定官方 release，并分别校验 amd64、arm64 asset SHA-256。
 - Node.js固定当前 Node 24 LTS 的精确官方 release，并分别校验 Linux x64、arm64 tarball SHA-256。
-- Codex继续动态追踪 official latest，不与 mise或 Node.js 采用相同的静态固定策略。
+- npm独立固定官方registry tarball及SHA-512，并验证其内置 `tar` 依赖为已修复版本，避免直接继承Node发行包中的已知漏洞。
+- Codex继续动态追踪 official latest，不与 mise、Node.js或npm采用相同的静态固定策略。
 
 Base与remote candidate push都会生成BuildKit `mode=min` provenance和SBOM。随后CI按各自不可变根digest验证：
 
@@ -117,7 +118,7 @@ Base Trivy保持初始非阻断基线：报告HIGH/CRITICAL，但漏洞数量不
 ./scripts/audit-supply-chain.sh
 ```
 
-它会检查Actions tag/SHA对应关系、Ubuntu根digest和平台、mise最新稳定release及双架构checksum、当前 Node 24 LTS及其双架构tarball checksum、Trivy固定版本。Codex不做静态版本比较，因为其official latest检查属于构建workflow。
+它会检查Actions tag/SHA对应关系、Ubuntu根digest和平台、mise最新稳定release及双架构checksum、当前 Node 24 LTS及其双架构tarball checksum、npm官方tarball SHA-512与内置 `tar` 版本、Trivy固定版本。Codex不做静态版本比较，因为其official latest检查属于构建workflow。
 
 ### 3.2 个人私有 Claude Code 派生镜像
 
