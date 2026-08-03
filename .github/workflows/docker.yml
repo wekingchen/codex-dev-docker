@@ -695,7 +695,7 @@ jobs:
 
       - name: 上传 SARIF 到 Code Scanning
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+        uses: github/codeql-action/upload-sarif@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
         with:
           sarif_file: trivy-${{ matrix.name }}.sarif
           category: trivy-container-${{ matrix.name }}
@@ -800,7 +800,7 @@ jobs:
       - name: 上传 remote SARIF 到 Code Scanning
         if: always()
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+        uses: github/codeql-action/upload-sarif@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
         with:
           sarif_file: trivy-remote-${{ matrix.name }}.sarif
           category: trivy-container-remote-${{ matrix.name }}
