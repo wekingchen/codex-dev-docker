@@ -29,6 +29,7 @@ env:
   IMAGE_BASENAME: codex-dev-base
   REMOTE_IMAGE_BASENAME: codex-dev-remote
   MISE_VERSION: "2026.7.7"
+  NODE_VERSION: "24.19.0"
   TRIVY_VERSION: "v0.72.0"
 
 jobs:
@@ -190,6 +191,7 @@ jobs:
           tags: codex-dev-smoke-base:${{ matrix.name }}
           build-args: |
             MISE_VERSION=v${{ env.MISE_VERSION }}
+            NODE_VERSION=v${{ env.NODE_VERSION }}
             CODEX_RELEASE=${{ needs.resolve-codex-latest.outputs.version }}
             CODEX_RELEASE_ID=${{ needs.resolve-codex-latest.outputs.release_id }}
             CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
@@ -197,12 +199,14 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=codex-dev-base
-            org.opencontainers.image.description=Codex 通用 Docker 运行底座。项目依赖由 Codex 后续在容器内按需安装。
+            org.opencontainers.image.description=预装 Node.js LTS、Python、Git 与 Codex 的通用 Docker 运行底座；项目特定版本和依赖按需安装。
             io.codex-dev.release-set=public-${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha,scope=codex-${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=codex-${{ matrix.name }}
 
       - name: 运行 base 镜像 smoke test
+        env:
+          EXPECTED_NODE_VERSION: v${{ env.NODE_VERSION }}
         run: |
           ./scripts/smoke-image.sh \
             codex-dev-smoke-base:${{ matrix.name }} \
@@ -221,6 +225,7 @@ jobs:
           tags: codex-dev-smoke-remote:${{ matrix.name }}
           build-args: |
             MISE_VERSION=v${{ env.MISE_VERSION }}
+            NODE_VERSION=v${{ env.NODE_VERSION }}
             CODEX_RELEASE=${{ needs.resolve-codex-latest.outputs.version }}
             CODEX_RELEASE_ID=${{ needs.resolve-codex-latest.outputs.release_id }}
             CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
@@ -228,7 +233,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=codex-dev-remote
-            org.opencontainers.image.description=通过宿主机SSH ProxyJump访问的key-only Codex远程运行镜像。
+            org.opencontainers.image.description=预装 Node.js LTS、Python、Git 与 Codex，通过宿主机 SSH ProxyJump 访问的 key-only 远程运行镜像。
             io.codex-dev.release-set=public-${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: |
             type=gha,scope=codex-${{ matrix.name }}
@@ -236,6 +241,8 @@ jobs:
           cache-to: type=gha,mode=max,scope=codex-remote-${{ matrix.name }}
 
       - name: 运行 remote SSH smoke test
+        env:
+          EXPECTED_NODE_VERSION: v${{ env.NODE_VERSION }}
         run: |
           ./scripts/smoke-remote-ssh.sh \
             codex-dev-smoke-remote:${{ matrix.name }} \
@@ -304,6 +311,7 @@ jobs:
           sbom: true
           build-args: |
             MISE_VERSION=v${{ env.MISE_VERSION }}
+            NODE_VERSION=v${{ env.NODE_VERSION }}
             CODEX_RELEASE=${{ needs.resolve-codex-latest.outputs.version }}
             CODEX_RELEASE_ID=${{ needs.resolve-codex-latest.outputs.release_id }}
             CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
@@ -311,7 +319,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=codex-dev-base
-            org.opencontainers.image.description=Codex 通用 Docker 运行底座。项目依赖由 Codex 后续在容器内按需安装。
+            org.opencontainers.image.description=预装 Node.js LTS、Python、Git 与 Codex 的通用 Docker 运行底座；项目特定版本和依赖按需安装。
             io.codex-dev.release-set=public-${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: |
             type=gha,scope=codex-amd64
@@ -388,6 +396,7 @@ jobs:
           sbom: true
           build-args: |
             MISE_VERSION=v${{ env.MISE_VERSION }}
+            NODE_VERSION=v${{ env.NODE_VERSION }}
             CODEX_RELEASE=${{ needs.resolve-codex-latest.outputs.version }}
             CODEX_RELEASE_ID=${{ needs.resolve-codex-latest.outputs.release_id }}
             CODEX_RELEASE_TAG=${{ needs.resolve-codex-latest.outputs.release_tag }}
@@ -395,7 +404,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=codex-dev-remote
-            org.opencontainers.image.description=通过宿主机SSH ProxyJump访问的key-only Codex远程运行镜像。
+            org.opencontainers.image.description=预装 Node.js LTS、Python、Git 与 Codex，通过宿主机 SSH ProxyJump 访问的 key-only 远程运行镜像。
             io.codex-dev.release-set=public-${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: |
             type=gha,scope=codex-remote-amd64
@@ -446,6 +455,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 按 digest 运行 smoke test
+        env:
+          EXPECTED_NODE_VERSION: v${{ env.NODE_VERSION }}
         run: |
           ./scripts/smoke-image.sh \
             "${{ needs.publish-candidate.outputs.image_name }}@${{ needs.publish-candidate.outputs.digest }}" \
@@ -488,6 +499,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 按 digest 运行 remote SSH smoke test
+        env:
+          EXPECTED_NODE_VERSION: v${{ env.NODE_VERSION }}
         run: |
           ./scripts/smoke-remote-ssh.sh \
             "${{ needs.publish-remote-candidate.outputs.image_name }}@${{ needs.publish-remote-candidate.outputs.digest }}" \

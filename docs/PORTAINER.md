@@ -518,6 +518,10 @@ pwd
 echo "$CODEX_HOME"
 codex --version
 mise --version
+node --version
+npm --version
+python --version
+git --version
 sudo -n true
 ```
 
@@ -648,6 +652,10 @@ docker inspect codex-ssh \
 
 docker exec --user dev codex-ssh codex --version
 docker exec --user dev codex-ssh mise --version
+docker exec --user dev codex-ssh node --version
+docker exec --user dev codex-ssh npm --version
+docker exec --user dev codex-ssh python --version
+docker exec --user dev codex-ssh git --version
 # personal双CLI Stack执行：
 docker exec --user dev codex-ssh bash -lc 'claude --version'
 docker exec codex-ssh xray version

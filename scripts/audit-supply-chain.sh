@@ -154,6 +154,44 @@ else
   report_ok "mise $mise_version 双架构 asset SHA-256 与官方 release一致"
 fi
 
+# Node.js 固定当前 Node 24 LTS release，并校验官方 x64/arm64 tarball SHA-256。
+node_version="$(grep -E '^ARG NODE_VERSION=v24\.[0-9]+\.[0-9]+$' "$REPO_ROOT/base/Dockerfile" | cut -d= -f2 || true)"
+node_sha_amd64="$(grep -E '^ARG NODE_SHA256_AMD64=[0-9a-f]{64}$' "$REPO_ROOT/base/Dockerfile" | cut -d= -f2 || true)"
+node_sha_arm64="$(grep -E '^ARG NODE_SHA256_ARM64=[0-9a-f]{64}$' "$REPO_ROOT/base/Dockerfile" | cut -d= -f2 || true)"
+workflow_node_version="$(grep -E '^[[:space:]]+NODE_VERSION: "[0-9]+\.[0-9]+\.[0-9]+"$' "$REPO_ROOT/.github/workflows/docker.yml" | sed -E 's/.*"([^"]+)"/v\1/' || true)"
+node_index="$(curl --fail --silent --show-error --retry 3 https://nodejs.org/dist/index.json)"
+latest_node_version="$(jq -r '.[] | select(.lts != false) | select(.version | startswith("v24.")) | .version' <<< "$node_index" | sort -V | tail -n 1)"
+node_shasums=""
+official_node_sha_amd64=""
+official_node_sha_arm64=""
+node_amd64_count=0
+node_arm64_count=0
+
+if [ -n "$node_version" ]; then
+  node_shasums="$(curl --fail --silent --show-error --retry 3 \
+    "https://nodejs.org/dist/${node_version}/SHASUMS256.txt")"
+  node_amd64_count="$(grep -Ec "^[0-9a-f]{64}  node-${node_version}-linux-x64\\.tar\\.xz$" <<< "$node_shasums" || true)"
+  node_arm64_count="$(grep -Ec "^[0-9a-f]{64}  node-${node_version}-linux-arm64\\.tar\\.xz$" <<< "$node_shasums" || true)"
+  official_node_sha_amd64="$(grep -E "^[0-9a-f]{64}  node-${node_version}-linux-x64\\.tar\\.xz$" <<< "$node_shasums" | cut -d' ' -f1 || true)"
+  official_node_sha_arm64="$(grep -E "^[0-9a-f]{64}  node-${node_version}-linux-arm64\\.tar\\.xz$" <<< "$node_shasums" | cut -d' ' -f1 || true)"
+fi
+
+if [ -z "$node_version" ] || [ -z "$node_sha_amd64" ] || [ -z "$node_sha_arm64" ]; then
+  report_error "Dockerfile 中 Node.js 24 LTS 版本或双架构 SHA-256 缺失"
+elif [ "$workflow_node_version" != "$node_version" ]; then
+  report_error "Dockerfile 与 docker workflow 的 Node.js 版本不一致：Dockerfile ${node_version}，workflow ${workflow_node_version:-<缺失>}"
+elif [ "$node_version" != "$latest_node_version" ]; then
+  report_error "Node.js 24 LTS 已有新版本：官方 ${latest_node_version}，仓库 ${node_version}"
+elif [ "$node_amd64_count" -ne 1 ] || [ "$node_arm64_count" -ne 1 ]; then
+  report_error "Node.js ${node_version} 官方 SHASUMS256.txt 缺少唯一的 x64 或 arm64 tar.xz 条目"
+elif [ "$node_sha_amd64" != "$official_node_sha_amd64" ]; then
+  report_error "Node.js ${node_version} amd64 SHA不匹配：官方 ${official_node_sha_amd64}，仓库 ${node_sha_amd64}"
+elif [ "$node_sha_arm64" != "$official_node_sha_arm64" ]; then
+  report_error "Node.js ${node_version} arm64 SHA不匹配：官方 ${official_node_sha_arm64}，仓库 ${node_sha_arm64}"
+else
+  report_ok "Node.js $node_version 为当前 Node 24 LTS，双架构 tarball SHA-256 与官方 SHASUMS256.txt 一致"
+fi
+
 # Trivy binary固定版本应跟随官方最新稳定release；Action pin由通用检查覆盖。
 trivy_version="$(grep -E '^[[:space:]]+TRIVY_VERSION:' "$REPO_ROOT/.github/workflows/docker.yml" | sed -E 's/.*"(v[^"]+)".*/\1/' || true)"
 trivy_release="$(github_api https://api.github.com/repos/aquasecurity/trivy/releases/latest)"

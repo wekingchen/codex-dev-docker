@@ -25,7 +25,7 @@ ghcr.io/wekingchen/codex-dev-personal-remote
 
 ## 1. 架构与状态目录
 
-私有镜像从同一次公开发布的不可变 base/remote 根 digest 派生，再加入经过官方签名 manifest 和 SHA-256 验证的 Claude Code native binary。`personal-remote` 还会在每次 workflow 中解析 XTLS/Xray-core 发布时间最新的非draft release（包含prerelease），把它固定为本次构建的exact tag、双架构asset digest和size后安装；`personal-base`不包含Xray。
+私有镜像从同一次公开发布的不可变 base/remote 根 digest 派生，继承公开父镜像中固定的 Node.js 24 LTS、Ubuntu Python、Git/Git LFS 与 Codex，再加入经过官方签名 manifest 和 SHA-256 验证的 Claude Code native binary。`personal-remote` 还会在每次 workflow 中解析 XTLS/Xray-core 发布时间最新的非draft release（包含prerelease），把它固定为本次构建的exact tag、双架构asset digest和size后安装；`personal-base`不包含Xray。
 
 ```text
 公开 codex-dev-base@sha256:...
@@ -45,7 +45,7 @@ ghcr.io/wekingchen/codex-dev-personal-remote
 - Claude Code主要状态：`/home/dev/.claude`
 - Claude Code其他用户状态：`/home/dev/.claude.json`
 
-不增加第二个 Compose service、第二个 SSH 端口或第二个 home volume。`personal-remote`在同一个容器内按开关运行Xray与sshd；Xray固定以UID/GID `65532:65532` 运行；配置必须恰好包含一个容器 `127.0.0.1:10809` HTTP inbound，所有inbound都只能监听loopback，且不发布宿主端口。代理开启时，Xray或sshd任一异常退出都会停止另一个进程并使容器fail closed退出。两个 CLI 共享 Git、mise、shell配置、项目文件和缓存，但认证目录彼此独立。
+不增加第二个 Compose service、第二个 SSH 端口或第二个 home volume。`personal-remote`在同一个容器内按开关运行Xray与sshd；Xray固定以UID/GID `65532:65532` 运行；配置必须恰好包含一个容器 `127.0.0.1:10809` HTTP inbound，所有inbound都只能监听loopback，且不发布宿主端口。代理开启时，Xray或sshd任一异常退出都会停止另一个进程并使容器fail closed退出。两个 CLI 共享 Node.js、Python、Git、mise、shell配置、项目文件和缓存，但认证目录彼此独立。正式 personal 发布会要求公开 base/remote 的 Node.js source、版本和双架构 SHA labels 完整一致，并在 personal smoke 与发布证据中再次验证。
 
 私有镜像设置：
 
@@ -590,6 +590,8 @@ Portainer操作的含义不同：
 
    ```bash
    docker exec --user dev codex-ssh bash -lc 'codex --version'
+   docker exec --user dev codex-ssh bash -lc 'node --version && npm --version'
+   docker exec --user dev codex-ssh bash -lc 'python --version && git --version'
    docker exec --user dev codex-ssh bash -lc 'claude --version'
    docker exec codex-ssh xray version
    docker exec codex-ssh /usr/local/bin/personal-remote-healthcheck.sh

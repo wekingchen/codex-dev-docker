@@ -218,6 +218,10 @@ jobs:
       codex_release_id: ${{ steps.public.outputs.codex_release_id }}
       codex_release_tag: ${{ steps.public.outputs.codex_release_tag }}
       codex_version: ${{ steps.public.outputs.codex_version }}
+      node_source: ${{ steps.public.outputs.node_source }}
+      node_version: ${{ steps.public.outputs.node_version }}
+      node_sha256_amd64: ${{ steps.public.outputs.node_sha256_amd64 }}
+      node_sha256_arm64: ${{ steps.public.outputs.node_sha256_arm64 }}
       mise_version: ${{ steps.mise.outputs.mise_version }}
 
     steps:
@@ -231,6 +235,8 @@ jobs:
 
       - name: 解析并验证公开父镜像对
         id: public
+        env:
+          ALLOW_LEGACY_NODE_PARENT: ${{ github.event_name == 'pull_request' && 'true' || 'false' }}
         run: ./scripts/resolve-public-release-pair.sh
 
       - name: 从精确父镜像读取一致的mise版本
@@ -414,6 +420,7 @@ jobs:
 
       - name: Smoke personal-base
         env:
+          EXPECTED_NODE_VERSION: ${{ needs.resolve-public.outputs.node_version }}
           EXPECTED_CLAUDE_VERSION: ${{ needs.resolve-claude.outputs.version }}
           EXPECTED_CLAUDE_SHA256: ${{ matrix.name == 'amd64' && needs.resolve-claude.outputs.sha256_amd64 || needs.resolve-claude.outputs.sha256_arm64 }}
         run: |
@@ -468,6 +475,7 @@ jobs:
 
       - name: Smoke personal-remote SSH
         env:
+          EXPECTED_NODE_VERSION: ${{ needs.resolve-public.outputs.node_version }}
           EXPECTED_CLAUDE_VERSION: ${{ needs.resolve-claude.outputs.version }}
           EXPECTED_CLAUDE_SHA256: ${{ matrix.name == 'amd64' && needs.resolve-claude.outputs.sha256_amd64 || needs.resolve-claude.outputs.sha256_arm64 }}
           EXPECTED_XRAY_VERSION: ${{ needs.resolve-xray.outputs.version }}
@@ -796,6 +804,7 @@ jobs:
 
       - name: Smoke candidate根digest
         env:
+          EXPECTED_NODE_VERSION: ${{ needs.resolve-public.outputs.node_version }}
           EXPECTED_CLAUDE_VERSION: ${{ needs.resolve-claude.outputs.version }}
           EXPECTED_CLAUDE_SHA256: ${{ matrix.name == 'amd64' && needs.resolve-claude.outputs.sha256_amd64 || needs.resolve-claude.outputs.sha256_arm64 }}
           EXPECTED_XRAY_VERSION: ${{ needs.resolve-xray.outputs.version }}
@@ -848,6 +857,10 @@ jobs:
           PERSONAL_RELEASE_SET: personal-${{ github.run_id }}-${{ github.run_attempt }}
           CODEX_VERSION: ${{ needs.resolve-public.outputs.codex_version }}
           MISE_VERSION: ${{ needs.resolve-public.outputs.mise_version }}
+          NODE_SOURCE: ${{ needs.resolve-public.outputs.node_source }}
+          NODE_VERSION: ${{ needs.resolve-public.outputs.node_version }}
+          NODE_SHA256_AMD64: ${{ needs.resolve-public.outputs.node_sha256_amd64 }}
+          NODE_SHA256_ARM64: ${{ needs.resolve-public.outputs.node_sha256_arm64 }}
           CLAUDE_VERSION: ${{ needs.resolve-claude.outputs.version }}
           CLAUDE_COMMIT: ${{ needs.resolve-claude.outputs.commit }}
           CLAUDE_MANIFEST_SHA256: ${{ needs.resolve-claude.outputs.manifest_sha256 }}
@@ -905,6 +918,10 @@ jobs:
                 --arg personal_release_set "$PERSONAL_RELEASE_SET" \
                 --arg codex_version "$CODEX_VERSION" \
                 --arg mise_version "v${MISE_VERSION}" \
+                --arg node_source "$NODE_SOURCE" \
+                --arg node_version "$NODE_VERSION" \
+                --arg node_sha256_amd64 "$NODE_SHA256_AMD64" \
+                --arg node_sha256_arm64 "$NODE_SHA256_ARM64" \
                 --arg claude_version "$CLAUDE_VERSION" \
                 --arg claude_commit "$CLAUDE_COMMIT" \
                 --arg claude_manifest "$CLAUDE_MANIFEST_SHA256" \
@@ -924,6 +941,10 @@ jobs:
                   .["io.codex-dev.release-set"] == $personal_release_set and
                   .["io.codex-dev.codex.version"] == $codex_version and
                   .["io.codex-dev.mise.version"] == $mise_version and
+                  .["io.codex-dev.node.source"] == $node_source and
+                  .["io.codex-dev.node.version"] == $node_version and
+                  .["io.codex-dev.node.sha256-amd64"] == $node_sha256_amd64 and
+                  .["io.codex-dev.node.sha256-arm64"] == $node_sha256_arm64 and
                   .["io.codex-dev.claude.version"] == $claude_version and
                   .["io.codex-dev.claude.commit"] == $claude_commit and
                   .["io.codex-dev.claude.manifest-sha256"] == $claude_manifest and
@@ -1470,6 +1491,10 @@ jobs:
           CODEX_RELEASE_TAG: ${{ needs.resolve-public.outputs.codex_release_tag }}
           CODEX_VERSION: ${{ needs.resolve-public.outputs.codex_version }}
           MISE_VERSION: ${{ needs.resolve-public.outputs.mise_version }}
+          NODE_SOURCE: ${{ needs.resolve-public.outputs.node_source }}
+          NODE_VERSION: ${{ needs.resolve-public.outputs.node_version }}
+          NODE_SHA256_AMD64: ${{ needs.resolve-public.outputs.node_sha256_amd64 }}
+          NODE_SHA256_ARM64: ${{ needs.resolve-public.outputs.node_sha256_arm64 }}
           CLAUDE_VERSION: ${{ needs.resolve-claude.outputs.version }}
           CLAUDE_COMMIT: ${{ needs.resolve-claude.outputs.commit }}
           CLAUDE_BUILD_DATE: ${{ needs.resolve-claude.outputs.build_date }}
@@ -1518,6 +1543,10 @@ jobs:
             --arg codex_release_tag "$CODEX_RELEASE_TAG" \
             --arg codex_version "$CODEX_VERSION" \
             --arg mise_version "$MISE_VERSION" \
+            --arg node_source "$NODE_SOURCE" \
+            --arg node_version "$NODE_VERSION" \
+            --arg node_sha256_amd64 "$NODE_SHA256_AMD64" \
+            --arg node_sha256_arm64 "$NODE_SHA256_ARM64" \
             --arg claude_version "$CLAUDE_VERSION" \
             --arg claude_commit "$CLAUDE_COMMIT" \
             --arg claude_build_date "$CLAUDE_BUILD_DATE" \
@@ -1567,6 +1596,13 @@ jobs:
                   version: $codex_version
                 },
                 mise: {version: $mise_version},
+                node: {
+                  source: $node_source,
+                  version: $node_version,
+                  sha256_amd64: $node_sha256_amd64,
+                  sha256_arm64: $node_sha256_arm64,
+                  inherited_from_public_parent: true
+                },
                 claude: {
                   version: $claude_version,
                   commit: $claude_commit,
@@ -1609,6 +1645,9 @@ jobs:
             echo "- Public parents: \`$PUBLIC_BASE_REF\`, \`$PUBLIC_REMOTE_REF\`"
             echo "- Codex: \`$CODEX_VERSION\` (\`$CODEX_RELEASE_TAG\`, release \`$CODEX_RELEASE_ID\`)"
             echo "- mise: \`$MISE_VERSION\`"
+            echo "- Node.js: \`$NODE_VERSION\`"
+            echo "- Node.js amd64 SHA-256: \`$NODE_SHA256_AMD64\`"
+            echo "- Node.js arm64 SHA-256: \`$NODE_SHA256_ARM64\`"
             echo "- Claude Code: \`$CLAUDE_VERSION\` (commit \`$CLAUDE_COMMIT\`)"
             echo "- Claude manifest SHA-256: \`$CLAUDE_MANIFEST_SHA256\`"
             echo "- Xray: \`$XRAY_TAG\` (prerelease=\`$XRAY_PRERELEASE\`, published \`$XRAY_PUBLISHED_AT\`)"

@@ -8,6 +8,9 @@ ARG USER_GID=$USER_UID
 ARG MISE_VERSION=v2026.7.7
 ARG MISE_SHA256_AMD64=429f71e7e989908bf975aafac9066329c16e2d8fc7cd8e74fdf21dd6300ffe7c
 ARG MISE_SHA256_ARM64=1b4ef061d25f0ceb508f11169482f3074e55c1698a1494f666386b2fcfb46b9b
+ARG NODE_VERSION=v24.19.0
+ARG NODE_SHA256_AMD64=14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647
+ARG NODE_SHA256_ARM64=01443c1e1a29e531ccad5a46fefa6df490d2189c49f7955904aecdbb0fe86fdc
 ARG CODEX_RELEASE=latest
 ARG CODEX_RELEASE_ID=latest
 ARG CODEX_RELEASE_TAG=latest
@@ -23,8 +26,8 @@ ENV MISE_DATA_DIR=/home/${USERNAME}/.local/share/mise
 ENV MISE_CONFIG_DIR=/home/${USERNAME}/.config/mise
 ENV PATH=/home/${USERNAME}/.local/share/mise/shims:/usr/local/bin:/home/${USERNAME}/.local/bin:${PATH}
 
-# 共享 runtime 只提供 Codex 通用工具，不预装完整技术栈。
-# 项目需要的语言运行时和依赖，后续由 Codex 根据项目内容在容器内安装。
+# 共享 runtime 预装通用 Node.js LTS、Ubuntu Python 和 Git 基础环境，但不包含完整技术栈。
+# 项目指定的其他运行时版本和依赖，后续由 Codex 根据项目配置通过 mise 或原生工具安装。
 # Ubuntu最小根文件系统尚无CA bundle。先通过仍受APT签名保护的HTTPS仓库安装CA，
 # 随后立即恢复证书校验并用HTTPS完成全部软件包安装。
 RUN sed -i \
@@ -141,6 +144,23 @@ RUN set -eux; \
 USER root
 WORKDIR /home/${USERNAME}
 
+# Node.js：固定官方 LTS release 和两个目标架构的 SHA-256，不使用浮动安装脚本。
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) NODE_ARCH="x64"; NODE_SHA256="${NODE_SHA256_AMD64}" ;; \
+        arm64) NODE_ARCH="arm64"; NODE_SHA256="${NODE_SHA256_ARM64}" ;; \
+        *) echo "Unsupported TARGETARCH for Node.js: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    NODE_ASSET="node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"; \
+    curl --fail --location --silent --show-error --retry 3 \
+        "https://nodejs.org/dist/${NODE_VERSION}/${NODE_ASSET}" \
+        --output "/tmp/${NODE_ASSET}"; \
+    printf '%s  %s\n' "${NODE_SHA256}" "/tmp/${NODE_ASSET}" | sha256sum --check --strict; \
+    tar --extract --xz --file "/tmp/${NODE_ASSET}" --directory /usr/local --strip-components=1 --no-same-owner; \
+    rm -f "/tmp/${NODE_ASSET}"; \
+    test "$(node --version)" = "${NODE_VERSION}"; \
+    npm --version
+
 # mise：固定官方 release 和两个目标架构的 SHA-256，不执行浮动远程安装脚本。
 RUN set -eux; \
     case "${TARGETARCH}" in \
@@ -176,6 +196,10 @@ RUN install -m 0755 "$(cat /tmp/codex-path)" /usr/local/bin/codex \
 
 LABEL io.codex-dev.mise.source="https://github.com/jdx/mise" \
       io.codex-dev.mise.version="${MISE_VERSION}" \
+      io.codex-dev.node.source="https://nodejs.org/dist" \
+      io.codex-dev.node.version="${NODE_VERSION}" \
+      io.codex-dev.node.sha256-amd64="${NODE_SHA256_AMD64}" \
+      io.codex-dev.node.sha256-arm64="${NODE_SHA256_ARM64}" \
       io.codex-dev.codex.source="https://github.com/openai/codex" \
       io.codex-dev.codex.release-id="${CODEX_RELEASE_ID}" \
       io.codex-dev.codex.release-tag="${CODEX_RELEASE_TAG}" \
